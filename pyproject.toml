@@ -1,0 +1,107 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mergelens"
+version = "0.1.4"
+description = "Pre-merge diagnostic framework for LLM model merging — analyze, diagnose, and optimize before you merge."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [
+    { name = "Shuhul Razdan", email = "shuhul.aiml@gmail.com" },
+]
+keywords = ["llm", "model-merging", "diagnostics", "mergekit", "transformers", "machine-learning", "deep-learning", "model-merge", "weight-analysis", "compatibility", "neural-network"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch>=2.0",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.20",
+    "typer>=0.9",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "numpy>=1.24",
+    "diskcache>=5.6",
+]
+
+[project.optional-dependencies]
+report = ["jinja2>=3.1", "plotly>=5.18"]
+mcp = ["mcp>=1.0"]
+audit = ["transformers>=4.36", "accelerate>=0.25"]
+vllm = ["vllm>=0.3"]
+dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
+all = ["mergelens[report,mcp,audit]"]
+
+[project.scripts]
+mergelens = "mergelens.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/shuhulx/mergelens"
+Repository = "https://github.com/shuhulx/mergelens"
+Issues = "https://github.com/shuhulx/mergelens/issues"
+
+[tool.hatch.build]
+exclude = [
+    "MergeLens_PROJECT_SPEC.md",
+    "LAUNCH_PLAN.md",
+    ".claude/",
+    ".DS_Store",
+    "tests/",
+    "examples/",
+    ".pytest_cache/",
+    ".venv/",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mergelens"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short --strict-markers --strict-config --durations=5"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["B008", "B904", "B905", "E402", "E501", "E701", "F401", "SIM108", "SIM118", "RUF012", "UP007"]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/**/*.py" = ["S101", "PLR2004", "RUF059", "B018"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["mergelens"]
+
+[tool.coverage.run]
+source = ["mergelens"]
+omit = ["tests/*"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pyright]
+include = ["src/mergelens"]
+pythonVersion = "3.9"
+pythonPlatform = "All"
+typeCheckingMode = "basic"
+reportMissingImports = false

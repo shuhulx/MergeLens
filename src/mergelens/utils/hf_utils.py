@@ -70,7 +70,7 @@ def _get_local_metadata(local_path: str) -> ModelMetadata:
             )
             # Estimate parameters from config
             meta.num_parameters = _estimate_params_from_config(meta.config)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, OSError):
             pass  # Config file is optional/malformed
 
     return meta
@@ -112,7 +112,7 @@ def _get_hub_metadata(repo_id: str) -> ModelMetadata:
         )
         if meta.num_parameters is None:
             meta.num_parameters = _estimate_params_from_config(meta.config)
-    except (EntryNotFoundError, RepositoryNotFoundError, json.JSONDecodeError, IOError):
+    except (EntryNotFoundError, RepositoryNotFoundError, json.JSONDecodeError, OSError):
         pass
 
     return meta

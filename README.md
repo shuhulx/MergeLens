@@ -181,27 +181,6 @@ pytest
 - Kornblith et al. 2019, "Similarity of Neural Network Representations Revisited" ([arXiv:1905.00414](https://arxiv.org/abs/1905.00414))
 - Rahamim et al. 2026, "Will it Merge?" ([arXiv:2601.06672](https://arxiv.org/abs/2601.06672))
 
-## Changelog
-
-### 0.1.5
-
-- **Fixed:** Sign disagreement rate now includes zero-vs-nonzero mismatches
-- **Fixed:** SLERP strategy confidence now factors in MCI score
-- **Fixed:** Conflict zone detection threshold aligned with severity bands (0.85 -> 0.80)
-- **Fixed:** Per-layer override factors now scale by zone severity (LOW=0.9 to CRITICAL=0.3)
-- **Fixed:** TSV interference returns NaN instead of 0.0 when no pairs available
-- **Fixed:** Grassmann distance returns NaN for degenerate zero subspaces
-- **Fixed:** Empty models list in MergeKit config parser now raises ValueError
-- **Fixed:** Path traversal hardening in MCP report generation
-- **Fixed:** MCP temp file cleanup in proper try/finally
-- **Fixed:** Report title XSS protection via html.escape()
-- **Fixed:** JSON parse errors in hf_utils now caught gracefully
-- **Improved:** MCI confidence uses weighted metric importance instead of simple count
-- **Improved:** Tensor shape validation in all pairwise metric functions
-- **Improved:** Cache hash uses full tensor for <1M elements, 1000 samples for larger
-- **Added:** Cache key versioning (v2) to prevent stale cache hits
-- **Added:** Attribution normalization fallback warning
-
 ## License
 
 Apache 2.0

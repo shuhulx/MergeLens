@@ -5,7 +5,7 @@ Usage:
 """
 import sys
 
-from mergelens import diagnose
+from mergelens import diagnose_config
 
 
 def main():
@@ -13,14 +13,19 @@ def main():
         print("Usage: python mergekit_diagnosis.py <config.yaml>")
         sys.exit(1)
 
-    result = diagnose(sys.argv[1])
-    print(f"Config quality: {result.quality}")
-    print(f"Interference score: {result.interference_score:.3f}")
+    result = diagnose_config(sys.argv[1])
+    print(f"Overall interference: {result.overall_interference:.3f}")
 
-    if result.warnings:
-        print("\nWarnings:")
-        for w in result.warnings:
-            print(f"  - {w}")
+    if result.recommendations:
+        print("\nRecommendations:")
+        for r in result.recommendations:
+            print(f"  - {r}")
+
+    if result.interference_scores:
+        print(f"\nTop interference layers ({len(result.interference_scores)} total):")
+        top = sorted(result.interference_scores, key=lambda s: s.score, reverse=True)[:5]
+        for s in top:
+            print(f"  {s.layer_name}: {s.score:.3f}")
 
 if __name__ == "__main__":
     main()

@@ -36,7 +36,7 @@ def generate_report(
     """
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATE_DIR)),
-        autoescape=select_autoescape(["html"]),
+        autoescape=select_autoescape(["html", "j2"]),
     )
     template = env.get_template("base.html.j2")
 

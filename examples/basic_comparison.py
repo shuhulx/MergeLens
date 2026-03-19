@@ -5,7 +5,7 @@ Usage:
 """
 import sys
 
-from mergelens import compare
+from mergelens import compare_models
 
 
 def main():
@@ -13,7 +13,7 @@ def main():
         print("Usage: python basic_comparison.py <model_a> <model_b>")
         sys.exit(1)
 
-    result = compare(sys.argv[1], sys.argv[2])
+    result = compare_models([sys.argv[1], sys.argv[2]])
     print(f"Merge Compatibility Index: {result.mci.score}/100")
     print(f"Verdict: {result.mci.verdict}")
     print(f"Conflict zones: {len(result.conflict_zones)}")

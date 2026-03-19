@@ -60,6 +60,7 @@ class LayerMetrics(BaseModel):
     shape: tuple[int, ...] = ()
     cosine_similarity: float = Field(ge=-1.0, le=1.0)
     l2_distance: float = Field(ge=0.0)
+    kl_divergence: float | None = Field(default=None, ge=0.0)
     # Optional — some require task vectors or activations
     spectral_overlap: float | None = Field(default=None, ge=0.0, le=1.0)
     effective_rank_ratio: float | None = Field(default=None, ge=0.0)

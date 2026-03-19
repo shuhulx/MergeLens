@@ -12,6 +12,7 @@ from mergelens.compare.metrics import (
     centered_task_vector_energy,
     cosine_similarity,
     effective_rank_ratio,
+    kl_divergence,
     l2_distance,
     merge_compatibility_index,
     sign_disagreement_rate,
@@ -64,11 +65,24 @@ def compare_models(
     all_handles = handles if base_model is None else [base_handle, *handles]
     common_names = find_common_tensors(all_handles)
 
+    # Warn once if sign_disagreement_rate / tsv_interference will be skipped.
+    # These metrics require at least 2 task vectors (model_a - base, model_b - base),
+    # so they need either 3+ models or an explicit --base separate from the compared models.
+    _two_model_no_base = base_model is None and len(model_paths) == 2
+    if _two_model_no_base:
+        logger.info(
+            "sign_disagreement_rate and tsv_interference require an explicit --base model "
+            "(separate from the models being compared) so that independent task vectors can be "
+            "formed for each model. With only 2 models and no base these metrics will be None. "
+            "Pass base_model= to enable them."
+        )
+
     if not common_names:
         raise ValueError("No common tensor names found between models.")
 
     all_layer_metrics: list[LayerMetrics] = []
     all_cosines: list[float] = []
+    all_kl: list[float] = []
     all_spectral: list[float] = []
     all_rank_ratios: list[float] = []
     all_sign_disagree: list[float] = []
@@ -96,6 +110,13 @@ def compare_models(
             )
 
             all_cosines.append(cos_sim)
+
+            try:
+                kl_div = kl_divergence(base_tensor, model_tensor)
+                lm.kl_divergence = kl_div
+                all_kl.append(kl_div)
+            except Exception:
+                logger.debug("kl_divergence computation failed for %s", name, exc_info=True)
 
             # Spectral overlap (only for 2D+ tensors with enough elements)
             if base_tensor.numel() > 128:

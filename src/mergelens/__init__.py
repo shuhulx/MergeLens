@@ -12,7 +12,7 @@ from importlib import metadata
 try:
     __version__ = metadata.version("mergelens")
 except metadata.PackageNotFoundError:
-    __version__ = "0.1.4"
+    __version__ = "0.1.5"
 
 from mergelens.compare import compare_models
 from mergelens.diagnose import diagnose_config

@@ -6,7 +6,7 @@
     <a href="https://pypi.org/project/mergelens/"><img src="https://img.shields.io/pypi/pyversions/mergelens" alt="Python"></a>
     <a href="https://github.com/shuhulx/mergelens/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
     <a href="https://pypi.org/project/mergelens/"><img src="https://img.shields.io/pypi/dm/mergelens" alt="Downloads"></a>
-    <img src="https://img.shields.io/badge/tests-192%20passed-brightgreen.svg" alt="Tests">
+    <img src="https://img.shields.io/badge/tests-194%20passed-brightgreen.svg" alt="Tests">
   </p>
 </p>
 

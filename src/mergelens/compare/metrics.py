@@ -369,15 +369,16 @@ def merge_compatibility_index(
     raw_score = sum(components[k] * weights[k] / total_weight for k in components)
     score = float(np.clip(raw_score * 100, 0, 100))
 
-    # Confidence weighted by metric importance
+    # Confidence weighted by metric importance.
+    # Keys must match the keys used in the `components` dict above.
     metric_weights = {
-        "cosine": 0.25,
-        "spectral": 0.15,
-        "rank": 0.10,
-        "sign": 0.15,
-        "tsv": 0.10,
-        "energy": 0.10,
-        "kl": 0.15,
+        "cosine_similarity": 0.25,
+        "spectral_overlap": 0.15,
+        "rank_ratio": 0.10,
+        "sign_agreement": 0.15,
+        "tsv_compatibility": 0.10,
+        "energy_balance": 0.10,
+        "cka_similarity": 0.15,
     }
     confidence = sum(metric_weights.get(m, 0.1) for m in components)
     confidence = min(confidence, 1.0)

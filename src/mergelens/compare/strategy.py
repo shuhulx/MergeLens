@@ -113,7 +113,7 @@ def recommend_strategy(result: CompareResult) -> StrategyRecommendation:
     t = min(0.5, max(0.3, 1.0 - avg_cos))  # Lower t when models are more similar
 
     # Add per-layer overrides for conflict zones, scaled by severity
-    severity_factor = {"LOW": 0.9, "MEDIUM": 0.7, "HIGH": 0.5, "CRITICAL": 0.3}
+    severity_factor = {"low": 0.9, "medium": 0.7, "high": 0.5, "critical": 0.3}
     if conflicts:
         for zone in conflicts:
             factor = severity_factor.get(

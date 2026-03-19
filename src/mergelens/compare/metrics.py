@@ -211,7 +211,7 @@ def tsv_interference_score(
             n_pairs += 1
 
     if n_pairs == 0:
-        return float("nan")
+        return 0.0
     return total_interference / n_pairs
 
 

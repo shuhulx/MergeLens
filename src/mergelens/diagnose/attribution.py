@@ -38,9 +38,10 @@ def compute_attribution(
         if total > 0:
             contributions = {k: round(max(0.0, v) / total, 4) for k, v in similarities.items()}
         else:
-            logger.warning(
+            logger.error(
                 "All source contributions are negative for layer '%s'; "
-                "falling back to uniform distribution.",
+                "merged layer is dissimilar to ALL sources. "
+                "Falling back to uniform distribution.",
                 name,
             )
             contributions = {k: round(1.0 / len(similarities), 4) for k in similarities}

@@ -47,6 +47,7 @@ def generate_report(
         charts["mci"] = _build_mci_gauge(compare_result)
         charts["heatmap"] = _build_similarity_heatmap(compare_result)
         charts["spectral"] = _build_spectral_chart(compare_result)
+        charts["layer_metrics"] = _build_layer_metrics_chart(compare_result)
         charts["conflicts"] = _build_conflict_chart(compare_result)
 
     title = html_mod.escape(title)
@@ -204,6 +205,20 @@ def _build_spectral_chart(result: CompareResult) -> dict:
             }
         )
 
+    sign = [m.sign_disagreement_rate for m in result.layer_metrics]
+    if any(v is not None for v in sign):
+        traces.append(
+            {
+                "type": "scatter",
+                "mode": "lines+markers",
+                "x": layers,
+                "y": [v if v is not None else None for v in sign],
+                "name": "Sign Disagreement",
+                "line": {"dash": "dot"},
+                "connectgaps": True,
+            }
+        )
+
     return {
         "data": traces,
         "layout": {
@@ -214,6 +229,58 @@ def _build_spectral_chart(result: CompareResult) -> dict:
             "margin": {"t": 40, "b": 40, "l": 60, "r": 30},
         },
     }
+
+
+def _build_layer_metrics_chart(result: CompareResult) -> dict:
+    """Build dual-axis chart showing L2 distance and sign disagreement per layer."""
+    layers = list(range(len(result.layer_metrics)))
+    l2_vals = [m.l2_distance for m in result.layer_metrics]
+    sign_vals = [m.sign_disagreement_rate for m in result.layer_metrics]
+    has_sign = any(v is not None for v in sign_vals)
+
+    traces = [
+        {
+            "type": "bar",
+            "x": layers,
+            "y": l2_vals,
+            "name": "L2 Distance",
+            "marker": {"color": "#5c6bc0", "opacity": 0.7},
+            "yaxis": "y",
+        }
+    ]
+
+    if has_sign:
+        traces.append(
+            {
+                "type": "scatter",
+                "mode": "lines+markers",
+                "x": layers,
+                "y": [v if v is not None else None for v in sign_vals],
+                "name": "Sign Disagreement Rate",
+                "line": {"color": "#ef5350", "width": 2},
+                "marker": {"color": "#ef5350", "size": 5},
+                "yaxis": "y2",
+                "connectgaps": True,
+            }
+        )
+
+    layout: dict = {
+        "title": "Layer-Level Divergence: L2 Distance & Sign Disagreement",
+        "xaxis": {"title": "Layer Index"},
+        "yaxis": {"title": "L2 Distance", "side": "left"},
+        "height": 400,
+        "margin": {"t": 40, "b": 40, "l": 60, "r": 80},
+        "legend": {"x": 1.08, "y": 1},
+    }
+    if has_sign:
+        layout["yaxis2"] = {
+            "title": "Sign Disagreement Rate",
+            "side": "right",
+            "overlaying": "y",
+            "range": [0, 1.1],
+        }
+
+    return {"data": traces, "layout": layout}
 
 
 def _build_conflict_chart(result: CompareResult) -> dict:

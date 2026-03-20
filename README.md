@@ -56,11 +56,24 @@ Add a base model for task vector metrics:
 mergelens compare model_a/ model_b/ --base base_model/
 ```
 
-Generate an HTML report:
+Generate an interactive HTML report:
 
 ```bash
 mergelens compare model_a/ model_b/ --report report.html
+mergelens compare model_a/ model_b/ --base base_model/ --report report.html
 ```
+
+The HTML report is a single self-contained file with embedded Plotly charts — no server required.
+
+**Report contents:**
+- **MCI Gauge** — score, verdict, confidence interval
+- **MCI Components** — per-metric breakdown table
+- **Weight Similarity Heatmap** — layer × model-pair cosine similarity grid
+- **Spectral Analysis Dashboard** — spectral overlap, rank ratio, task vector energy, and sign disagreement across layers
+- **Layer Divergence Chart** — L2 distance (bars) and sign disagreement rate (line) on dual axes
+- **Conflict Zone Analysis** — bar chart + table with severity, layer range, and recommendation per zone
+- **Layer Metrics Table** — raw values for all metrics per layer, scrollable
+- **Strategy Recommendation** — method, confidence, reasoning, and copy-paste MergeKit YAML
 
 Diagnose a MergeKit config before running it:
 
@@ -171,6 +184,21 @@ cd mergelens
 pip install -e ".[dev,all]"
 pytest
 ```
+
+## Changelog
+
+### 0.1.9
+- **Added:** Layer Divergence chart — dual-axis bar+line showing L2 distance and sign disagreement rate per layer
+- **Added:** Sign Disagreement trace on Spectral Analysis Dashboard
+- **Added:** Report contents documentation
+
+### 0.1.8
+- **Fixed:** `severity_factor` dict keys now match lowercase `Severity` enum values — previously all severities defaulted to 0.5, breaking strategy confidence scoring
+- **Fixed:** `tsv_interference_score` returns `0.0` (not `NaN`) when only one task vector is present
+- **Fixed:** `grassmann_distance` returns `1.0` (not `NaN`) for empty subspaces
+
+### 0.1.7
+- **Fixed:** Attribution logger upgraded from `warning` to `error` for all-negative cosine similarity case
 
 ## References
 

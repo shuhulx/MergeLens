@@ -185,25 +185,6 @@ pip install -e ".[dev,all]"
 pytest
 ```
 
-## Changelog
-
-### 0.1.10
-- **Docs:** Added Report Contents section — all 8 charts listed with descriptions
-- **Docs:** Added changelog (0.1.7–0.1.9)
-
-### 0.1.9
-- **Added:** Layer Divergence chart — dual-axis bar+line showing L2 distance and sign disagreement rate per layer
-- **Added:** Sign Disagreement trace on Spectral Analysis Dashboard
-- **Added:** Report contents documentation
-
-### 0.1.8
-- **Fixed:** `severity_factor` dict keys now match lowercase `Severity` enum values — previously all severities defaulted to 0.5, breaking strategy confidence scoring
-- **Fixed:** `tsv_interference_score` returns `0.0` (not `NaN`) when only one task vector is present
-- **Fixed:** `grassmann_distance` returns `1.0` (not `NaN`) for empty subspaces
-
-### 0.1.7
-- **Fixed:** Attribution logger upgraded from `warning` to `error` for all-negative cosine similarity case
-
 ## References
 
 - Zhou et al. 2026, "Demystifying Mergeability of Homologous LLMs" ([arXiv:2601.22285](https://arxiv.org/abs/2601.22285))

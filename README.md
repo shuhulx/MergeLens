@@ -187,6 +187,10 @@ pytest
 
 ## Changelog
 
+### 0.1.10
+- **Docs:** Added Report Contents section — all 8 charts listed with descriptions
+- **Docs:** Added changelog (0.1.7–0.1.9)
+
 ### 0.1.9
 - **Added:** Layer Divergence chart — dual-axis bar+line showing L2 distance and sign disagreement rate per layer
 - **Added:** Sign Disagreement trace on Spectral Analysis Dashboard

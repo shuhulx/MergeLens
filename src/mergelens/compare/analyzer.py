@@ -39,6 +39,7 @@ def compare_models(
     cache: MetricCache | None = None,
     show_progress: bool = True,
     include_strategy: bool = True,
+    cka_scores: list[float] | None = None,
 ) -> CompareResult:
     """Compare two or more models layer-by-layer.
 
@@ -52,6 +53,11 @@ def compare_models(
         cache: Optional metric cache instance.
         show_progress: Show rich progress bar.
         include_strategy: Whether to include merge strategy recommendation.
+        cka_scores: Optional pre-computed CKA similarity scores per layer.
+            Use activations.cka.compare_activations_cka() to obtain these
+            and pass the resulting per-layer scores here so that the MCI
+            incorporates the activation-level similarity alongside weight
+            metrics.  Values must be in [0, 1].
 
     Returns:
         CompareResult with all metrics, conflict zones, MCI, and optional strategy.
@@ -80,14 +86,28 @@ def compare_models(
     if not common_names:
         raise ValueError("No common tensor names found between models.")
 
-    all_layer_metrics: list[LayerMetrics] = []
-    all_cosines: list[float] = []
-    all_kl: list[float] = []
-    all_spectral: list[float] = []
-    all_rank_ratios: list[float] = []
+    # Number of "non-base" models — these are the models being scored against
+    # the base.  When no explicit base is given, handles[0] acts as base and
+    # the remaining len(handles)-1 models are scored against it.  When an
+    # explicit base is provided, all len(handles) models are scored.
+    n_scored = len(handles) if base_model else len(handles) - 1
+    n_scored = max(n_scored, 1)  # guard for edge case
+
+    # Per-model metric accumulators.  Indexing: per_model_cosines[i] collects
+    # cosine similarities for the i-th scored model vs. base across all layers.
+    # Keeping metrics separate per model prevents mixing values from models with
+    # different divergence profiles into a single flat list, which makes the
+    # resulting MCI average statistically meaningless.
+    per_model_cosines: list[list[float]] = [[] for _ in range(n_scored)]
+    per_model_spectral: list[list[float]] = [[] for _ in range(n_scored)]
+    per_model_rank_ratios: list[list[float]] = [[] for _ in range(n_scored)]
+    per_model_energy: list[list[float]] = [[] for _ in range(n_scored)]
+
+    # Multi-model metrics — these are inherently cross-model, so one list suffices.
     all_sign_disagree: list[float] = []
     all_tsv: list[float] = []
-    all_energy: list[float] = []
+
+    all_layer_metrics: list[LayerMetrics] = []
 
     iterator = iter_aligned_tensors(all_handles, common_names)
     if show_progress:
@@ -97,7 +117,7 @@ def compare_models(
         base_tensor = tensors[0]
         model_tensors = tensors[1:]
 
-        for _i, model_tensor in enumerate(model_tensors):
+        for i, model_tensor in enumerate(model_tensors):
             cos_sim = cosine_similarity(base_tensor, model_tensor)
             l2_dist = l2_distance(base_tensor, model_tensor)
 
@@ -109,12 +129,11 @@ def compare_models(
                 l2_distance=l2_dist,
             )
 
-            all_cosines.append(cos_sim)
+            per_model_cosines[i].append(cos_sim)
 
             try:
                 kl_div = kl_divergence(base_tensor, model_tensor)
                 lm.kl_divergence = kl_div
-                all_kl.append(kl_div)
             except Exception:
                 logger.debug("kl_divergence computation failed for %s", name, exc_info=True)
 
@@ -123,7 +142,7 @@ def compare_models(
                 try:
                     spec_overlap = spectral_subspace_overlap(base_tensor, model_tensor, k=svd_rank)
                     lm.spectral_overlap = spec_overlap
-                    all_spectral.append(spec_overlap)
+                    per_model_spectral[i].append(spec_overlap)
                 except Exception:
                     logger.debug(
                         "spectral_subspace_overlap computation failed for %s", name, exc_info=True
@@ -132,7 +151,7 @@ def compare_models(
                 try:
                     rank_r = effective_rank_ratio(base_tensor, model_tensor)
                     lm.effective_rank_ratio = rank_r
-                    all_rank_ratios.append(rank_r)
+                    per_model_rank_ratios[i].append(rank_r)
                 except Exception:
                     logger.debug(
                         "effective_rank_ratio computation failed for %s", name, exc_info=True
@@ -144,7 +163,7 @@ def compare_models(
                 try:
                     energy = centered_task_vector_energy(task_vec, k=svd_rank)
                     lm.task_vector_energy = energy
-                    all_energy.append(energy)
+                    per_model_energy[i].append(energy)
                 except Exception:
                     logger.debug(
                         "centered_task_vector_energy computation failed for %s", name, exc_info=True
@@ -176,14 +195,79 @@ def compare_models(
                     "tsv_interference_score computation failed for %s", name, exc_info=True
                 )
 
-    mci = merge_compatibility_index(
-        cosine_sims=all_cosines,
-        spectral_overlaps=all_spectral or None,
-        rank_ratios=all_rank_ratios or None,
-        sign_disagreements=all_sign_disagree or None,
-        tsv_scores=all_tsv or None,
-        energy_scores=all_energy or None,
-    )
+    # Compute one MCI per model (model vs. base), then average the MCI scores
+    # across models.  This prevents metrics from different models being mixed
+    # into a single flat list before averaging, which is statistically invalid
+    # when models diverge from the base by different amounts.
+    import numpy as _np
+
+    per_model_mcis = []
+    for i in range(n_scored):
+        if not per_model_cosines[i]:
+            continue
+        per_model_mcis.append(
+            merge_compatibility_index(
+                cosine_sims=per_model_cosines[i],
+                spectral_overlaps=per_model_spectral[i] or None,
+                rank_ratios=per_model_rank_ratios[i] or None,
+                sign_disagreements=all_sign_disagree or None,
+                tsv_scores=all_tsv or None,
+                energy_scores=per_model_energy[i] or None,
+                # CKA scores are activation-based and model-agnostic (one
+                # score per shared layer), so the same list is passed for
+                # every per-model MCI.  Callers obtain these via
+                # activations.cka.compare_activations_cka() and supply them
+                # through the cka_scores= parameter of compare_models().
+                cka_scores=cka_scores or None,
+            )
+        )
+
+    if not per_model_mcis:
+        from mergelens.models import MergeCompatibilityIndex as _MCI
+
+        mci = _MCI(
+            score=0.0,
+            confidence=0.0,
+            ci_lower=0.0,
+            ci_upper=0.0,
+            verdict="insufficient data",
+            components={},
+        )
+    elif len(per_model_mcis) == 1:
+        mci = per_model_mcis[0]
+    else:
+        # Average across models: use the most conservative (lowest) score as
+        # the primary value but report the mean verdict for transparency.
+        avg_score = float(_np.mean([m.score for m in per_model_mcis]))
+        avg_conf = float(_np.mean([m.confidence for m in per_model_mcis]))
+        avg_lower = float(_np.mean([m.ci_lower for m in per_model_mcis]))
+        avg_upper = float(_np.mean([m.ci_upper for m in per_model_mcis]))
+        # Merge component dicts by averaging shared keys
+        all_keys = set().union(*(m.components.keys() for m in per_model_mcis))
+        merged_components = {
+            k: float(
+                _np.mean([m.components[k] for m in per_model_mcis if k in m.components])
+            )
+            for k in all_keys
+        }
+        if avg_score >= 75:
+            verdict = "highly compatible"
+        elif avg_score >= 55:
+            verdict = "compatible"
+        elif avg_score >= 35:
+            verdict = "risky"
+        else:
+            verdict = "incompatible"
+        from mergelens.models import MergeCompatibilityIndex as _MCI
+
+        mci = _MCI(
+            score=round(avg_score, 1),
+            confidence=round(avg_conf, 2),
+            ci_lower=round(avg_lower, 1),
+            ci_upper=round(avg_upper, 1),
+            verdict=verdict,
+            components=merged_components,
+        )
 
     conflict_zones = _detect_conflict_zones(all_layer_metrics)
 

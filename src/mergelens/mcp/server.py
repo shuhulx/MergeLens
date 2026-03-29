@@ -131,10 +131,16 @@ def create_server():
         from mergelens.compare.analyzer import compare_models as _compare
         from mergelens.report.generator import generate_report as _report
 
-        # Security: prevent path traversal from MCP clients
+        # Security: prevent path traversal from MCP clients.
+        # Path.is_relative_to() was added in Python 3.9 but has a known
+        # edge-case crash on Python 3.10 when the compared paths have
+        # incompatible roots on some platforms.  Use relative_to() with a
+        # try/except — it works identically on all Python 3.x versions.
         resolved = Path(output_path).resolve()
         cwd = Path.cwd().resolve()
-        if not resolved.is_relative_to(cwd):
+        try:
+            resolved.relative_to(cwd)
+        except ValueError:
             raise ValueError(
                 f"output_path must be within the current working directory. Resolved to: {resolved}"
             )
@@ -203,17 +209,9 @@ def create_server():
         Requires mergelens[audit] extra. Runs probes across categories
         like reasoning, code, chat, math, safety, instruction_following.
         """
-        return {
-            "status": "not_implemented",
-            "message": "Audit module is not yet available. Install mergelens[audit] for future support.",
-            "categories_available": [
-                "reasoning",
-                "code",
-                "chat",
-                "math",
-                "safety",
-                "instruction_following",
-            ],
-        }
+        raise NotImplementedError(
+            "The audit_model tool is not yet implemented. "
+            "Capability auditing is planned for a future release of MergeLens."
+        )
 
     return mcp

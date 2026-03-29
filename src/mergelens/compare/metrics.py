@@ -353,7 +353,6 @@ def merge_compatibility_index(
         components["cka_similarity"] = float(avg_cka)
         weights["cka_similarity"] = 0.10
 
-    # Normalize weights to sum to 1.0
     total_weight = sum(weights.values())
     if total_weight == 0:
         return MergeCompatibilityIndex(
@@ -365,8 +364,14 @@ def merge_compatibility_index(
             components=components,
         )
 
-    # Weighted average
-    raw_score = sum(components[k] * weights[k] / total_weight for k in components)
+    # Normalize weights once up-front so the weighted average below does not
+    # divide again (previously the division by total_weight happened inside the
+    # sum expression, effectively double-normalizing when weights had already
+    # been designed to sum to 1.0 for the full metric set).
+    normalized_weights = {k: w / total_weight for k, w in weights.items()}
+
+    # Weighted average of [0,1] component scores → scale to [0,100]
+    raw_score = sum(components[k] * normalized_weights[k] for k in components)
     score = float(np.clip(raw_score * 100, 0, 100))
 
     # Confidence weighted by metric importance.

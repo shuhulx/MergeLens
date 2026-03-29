@@ -232,13 +232,12 @@ def audit(
             border_style="cyan",
         )
     )
-    try:
-        # Audit module is not yet fully implemented
-        console.print("[yellow]Audit module is not yet available.[/yellow]")
-        console.print("This feature will be added in a future release.")
-        console.print("Install the extra with: [cyan]pip install mergelens\\[audit][/cyan]")
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+    console.print("[yellow]The audit command is not yet implemented.[/yellow]")
+    console.print(
+        "Capability auditing (probe-based regression testing against a base model) "
+        "is planned for a future release."
+    )
+    raise typer.Exit(1)
 
 
 @app.command()

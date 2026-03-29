@@ -122,15 +122,18 @@ def _build_similarity_heatmap(result: CompareResult) -> dict:
     else:
         pair_labels = ["Cosine Similarity"]
 
-    # Organize into rows per model pair. If layer_metrics is a flat list for a
-    # single pair (the common case), wrap as one row. If there are N*(N-1)/2
-    # pairs worth of data, split into rows.
-    n_pairs = len(pair_labels)
-    n_layers = len(layers) // n_pairs if n_pairs > 1 and len(layers) % n_pairs == 0 else len(layers)
+    # Organize into rows per scored model. layer_metrics contains one entry per
+    # (layer, scored_model) pair — n_scored rows of n_layers each. n_scored is
+    # len(models) - 1 when the first model acts as implicit base (common case).
+    # Use n_scored rather than n_pairs (combinations) which overcounts for
+    # multi-model comparisons.
+    n_scored = max(len(result.models) - 1, 1)
+    n_layers = len(layers) // n_scored if n_scored > 1 and len(layers) % n_scored == 0 else len(layers)
 
-    if n_pairs > 1 and len(values) == n_layers * n_pairs:
-        z = [values[i * n_layers : (i + 1) * n_layers] for i in range(n_pairs)]
+    if n_scored > 1 and len(values) == n_layers * n_scored:
+        z = [values[i * n_layers : (i + 1) * n_layers] for i in range(n_scored)]
         x_labels = [m.layer_name.split(".")[-1][:30] for m in result.layer_metrics[:n_layers]]
+        pair_labels = pair_labels[:n_scored] if len(pair_labels) >= n_scored else pair_labels
     else:
         z = [values]
         x_labels = layers

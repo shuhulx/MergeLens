@@ -145,8 +145,9 @@ class TestExportCSV:
         header = next(reader)
         expected = [
             "layer_name", "layer_type", "cosine_similarity", "l2_distance",
-            "spectral_overlap", "effective_rank_ratio", "sign_disagreement_rate",
-            "tsv_interference", "task_vector_energy", "cka_similarity",
+            "kl_divergence", "spectral_overlap", "effective_rank_ratio",
+            "sign_disagreement_rate", "tsv_interference", "task_vector_energy",
+            "cka_similarity",
         ]
         assert header == expected
 

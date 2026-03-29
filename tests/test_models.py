@@ -69,7 +69,7 @@ class TestLayerMetrics:
             cosine_similarity=0.95,
             l2_distance=0.05,
             spectral_overlap=0.8,
-            effective_rank_ratio=1.2,
+            effective_rank_ratio=0.9,
             sign_disagreement_rate=0.1,
             tsv_interference=0.3,
             task_vector_energy=0.5,
@@ -77,7 +77,7 @@ class TestLayerMetrics:
         )
         assert m.layer_type is LayerType.ATTENTION_Q
         assert m.shape == (32, 32)
-        assert m.effective_rank_ratio == 1.2
+        assert m.effective_rank_ratio == 0.9
 
     def test_cosine_bounds(self):
         with pytest.raises(ValidationError):

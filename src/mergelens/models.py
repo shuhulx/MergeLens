@@ -63,7 +63,7 @@ class LayerMetrics(BaseModel):
     kl_divergence: float | None = Field(default=None, ge=0.0)
     # Optional — some require task vectors or activations
     spectral_overlap: float | None = Field(default=None, ge=0.0, le=1.0)
-    effective_rank_ratio: float | None = Field(default=None, ge=0.0)
+    effective_rank_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
     sign_disagreement_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     tsv_interference: float | None = Field(default=None, ge=0.0)
     task_vector_energy: float | None = Field(default=None, ge=0.0, le=1.0)

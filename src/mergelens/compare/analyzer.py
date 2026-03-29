@@ -245,9 +245,7 @@ def compare_models(
         # Merge component dicts by averaging shared keys
         all_keys = set().union(*(m.components.keys() for m in per_model_mcis))
         merged_components = {
-            k: float(
-                _np.mean([m.components[k] for m in per_model_mcis if k in m.components])
-            )
+            k: float(_np.mean([m.components[k] for m in per_model_mcis if k in m.components]))
             for k in all_keys
         }
         if avg_score >= 75:

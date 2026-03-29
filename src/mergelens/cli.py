@@ -73,7 +73,6 @@ def compare(
                 base_model=base_model,
                 device=device,
                 svd_rank=svd_rank,
-                cache=cache,
                 include_strategy=not no_strategy,
             )
         except Exception as e:

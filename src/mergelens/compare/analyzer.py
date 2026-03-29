@@ -26,7 +26,6 @@ from mergelens.models import (
     LayerMetrics,
     Severity,
 )
-from mergelens.utils.cache import MetricCache
 from mergelens.utils.tensor_ops import compute_task_vector
 
 
@@ -36,7 +35,6 @@ def compare_models(
     device: str = "cpu",
     metrics: list[str] | None = None,
     svd_rank: int = 64,
-    cache: MetricCache | None = None,
     show_progress: bool = True,
     include_strategy: bool = True,
     cka_scores: list[float] | None = None,
@@ -50,7 +48,6 @@ def compare_models(
         device: Torch device for computation ("cpu" or "cuda").
         metrics: List of metric names to compute (None = all available).
         svd_rank: Number of singular vectors for spectral metrics.
-        cache: Optional metric cache instance.
         show_progress: Show rich progress bar.
         include_strategy: Whether to include merge strategy recommendation.
         cka_scores: Optional pre-computed CKA similarity scores per layer.
@@ -267,7 +264,22 @@ def compare_models(
             components=merged_components,
         )
 
-    conflict_zones = _detect_conflict_zones(all_layer_metrics)
+    # Detect conflict zones per model (each scored model vs. base), then
+    # deduplicate by taking the union.  Passing the flat all_layer_metrics
+    # directly would cause zones to span model boundaries because the list
+    # interleaves entries for different models (one entry per model per layer).
+    if n_scored == 1:
+        conflict_zones = _detect_conflict_zones(all_layer_metrics)
+    else:
+        seen_zone_keys: set[tuple] = set()
+        conflict_zones = []
+        for model_idx in range(n_scored):
+            model_metrics = all_layer_metrics[model_idx::n_scored]
+            for zone in _detect_conflict_zones(model_metrics):
+                key = (zone.start_layer, zone.end_layer, zone.severity)
+                if key not in seen_zone_keys:
+                    seen_zone_keys.add(key)
+                    conflict_zones.append(zone)
 
     result = CompareResult(
         models=[h.info for h in handles],

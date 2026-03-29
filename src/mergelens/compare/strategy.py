@@ -169,7 +169,7 @@ def _generate_yaml(
                     ],
                 }
             ],
-            "parameters": {"t": [params.get("t", 0.5)]},
+            "parameters": {"t": params.get("t", 0.5)},
             "dtype": "bfloat16",
         }
     elif method == MergeMethod.TIES:

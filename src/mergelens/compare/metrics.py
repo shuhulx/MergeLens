@@ -15,6 +15,7 @@ References:
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import numpy as np
@@ -204,9 +205,9 @@ def tsv_interference_score(
     for i in range(len(Vs)):
         for j in range(i + 1, len(Vs)):
             # Interference = Frobenius norm of V_i @ V_j^T
-            # Normalized by k to give per-direction interference
+            # Normalized by sqrt(k) to properly normalize to [0, 1] range
             overlap = Vs[i] @ Vs[j].T
-            interference = torch.norm(overlap, p="fro").item() / k
+            interference = torch.norm(overlap, p="fro").item() / math.sqrt(k)
             total_interference += interference
             n_pairs += 1
 
@@ -251,9 +252,9 @@ def cka_similarity(
 
     Based on: Kornblith et al. 2019 "Similarity of Neural Network Representations Revisited"
     """
-    if activations_a.numel() != activations_b.numel():
+    if activations_a.shape[0] != activations_b.shape[0]:
         raise ValueError(
-            f"Tensor size mismatch: {activations_a.numel()} vs {activations_b.numel()}"
+            f"Sample count mismatch: {activations_a.shape[0]} vs {activations_b.shape[0]} samples"
         )
     X = activations_a.float()
     Y = activations_b.float()
@@ -374,18 +375,9 @@ def merge_compatibility_index(
     raw_score = sum(components[k] * normalized_weights[k] for k in components)
     score = float(np.clip(raw_score * 100, 0, 100))
 
-    # Confidence weighted by metric importance.
-    # Keys must match the keys used in the `components` dict above.
-    metric_weights = {
-        "cosine_similarity": 0.25,
-        "spectral_overlap": 0.15,
-        "rank_ratio": 0.10,
-        "sign_agreement": 0.15,
-        "tsv_compatibility": 0.10,
-        "energy_balance": 0.10,
-        "cka_similarity": 0.15,
-    }
-    confidence = sum(metric_weights.get(m, 0.1) for m in components)
+    # Confidence weighted by metric importance — use the same weights dict
+    # that was used for score computation so the two are consistent.
+    confidence = sum(weights.get(m, 0.1) for m in components)
     confidence = min(confidence, 1.0)
 
     # Confidence interval (wider with fewer metrics)

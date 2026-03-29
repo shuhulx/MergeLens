@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mergelens"
-version = "0.1.13"
+version = "0.1.14"
 description = "Pre-merge diagnostic framework for LLM model merging — analyze, diagnose, and optimize before you merge."
 readme = "README.md"
 license = "Apache-2.0"

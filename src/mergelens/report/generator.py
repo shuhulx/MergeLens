@@ -128,7 +128,9 @@ def _build_similarity_heatmap(result: CompareResult) -> dict:
     # Use n_scored rather than n_pairs (combinations) which overcounts for
     # multi-model comparisons.
     n_scored = max(len(result.models) - 1, 1)
-    n_layers = len(layers) // n_scored if n_scored > 1 and len(layers) % n_scored == 0 else len(layers)
+    n_layers = (
+        len(layers) // n_scored if n_scored > 1 and len(layers) % n_scored == 0 else len(layers)
+    )
 
     if n_scored > 1 and len(values) == n_layers * n_scored:
         z = [values[i * n_layers : (i + 1) * n_layers] for i in range(n_scored)]

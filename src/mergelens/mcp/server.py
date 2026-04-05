@@ -209,6 +209,8 @@ def create_server():
         Requires mergelens[audit] extra. Runs probes across categories
         like reasoning, code, chat, math, safety, instruction_following.
         """
-        return {"error": "audit_model is not yet implemented. Capability auditing is planned for a future release of MergeLens."}
+        return {
+            "error": "audit_model is not yet implemented. Capability auditing is planned for a future release of MergeLens."
+        }
 
     return mcp

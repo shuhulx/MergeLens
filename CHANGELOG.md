@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.2
+
+- Polished the README, limitations, validation notes, and migration guide.
+
+There are no API or behavior changes in this release.
+
 ## 2.0.1
 
 - Changed the PyPI development status from Alpha to Beta.

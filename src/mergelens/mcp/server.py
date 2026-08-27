@@ -16,7 +16,7 @@ from typing import Any
 def create_server():
     """Create and configure the MergeLens MCP server."""
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
     except ImportError:
         raise ImportError(
             "MCP server requires the 'mcp' package. Install with: pip install mergelens[mcp]"

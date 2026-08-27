@@ -164,7 +164,9 @@ def validate_mergekit_yaml(yaml_content: str) -> tuple[bool, str | None]:
     """Validate with the installed MergeKit parser when it is available."""
 
     try:
-        from mergekit.config import MergeConfiguration  # type: ignore[import-not-found]
+        from mergekit.config import (  # type: ignore[import-not-found, import-untyped]
+            MergeConfiguration,
+        )
     except ImportError:
         return False, None
     raw = yaml.safe_load(yaml_content)

@@ -24,7 +24,7 @@ def generate_report(
     """
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
-        from plotly.offline import get_plotlyjs  # type: ignore[import-untyped]
+        from plotly.offline import get_plotlyjs  # type: ignore[import-not-found, import-untyped]
     except ImportError as exc:
         raise ImportError(
             "HTML reports require optional dependencies. Install with: pip install mergelens[report]"

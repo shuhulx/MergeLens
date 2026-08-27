@@ -7,7 +7,7 @@ Thanks for your interest in contributing!
 ```bash
 git clone https://github.com/shuhulx/mergelens.git
 cd mergelens
-pip install -e ".[dev]"
+python -m pip install -e ".[dev,all]"
 pre-commit install
 ```
 
@@ -17,7 +17,7 @@ pre-commit install
 make test        # run tests
 make lint        # run linters
 make format      # auto-format
-make ci          # full CI check
+make ci          # static checks, tests, and package build
 ```
 
 ## Pull Requests

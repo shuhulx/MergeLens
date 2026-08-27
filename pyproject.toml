@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mergelens"
 dynamic = ["version"]
-description = "Experimental static inspection toolkit for homologous LLM checkpoints."
+description = "Inspect and compare LLM checkpoints before merging them."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"

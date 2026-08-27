@@ -1,7 +1,5 @@
 # MergeLens 2.0.1
 
-## Package metadata
+PyPI now lists MergeLens as Beta instead of Alpha. The package description and documentation have also been cleaned up.
 
-- Updated the PyPI development status from Alpha to Beta.
-
-There are no API or behavior changes in this release.
+There are no API or behaviour changes in this release.

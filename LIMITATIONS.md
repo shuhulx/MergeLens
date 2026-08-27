@@ -1,18 +1,19 @@
 # Limitations
 
-MergeLens is an experimental static-inspection tool, not a merge-outcome predictor.
+MergeLens inspects checkpoints. It does not predict the quality of a finished merge.
 
-- Checkpoints must be homologous enough for tensor names, exact shapes, and floating dtypes to align. Matching element counts with different shapes and non-floating tensors are excluded; differing supported floating dtypes are compared in float32 and disclosed.
-- Coverage can be partial because names are missing or shapes differ. Raw coverage remains visible, and known structural conflicts suppress the aggregate heuristic.
-- Static tensor signals do not establish downstream behaviour, capability retention, safety, instruction following, or generation quality.
-- Composite weights, thresholds, risk tiers, and sensitivity bands are hand-specified. They have not been prospectively calibrated against a representative dataset of merge outcomes.
-- Linear CKA is optional, activation-layer scoped, and excluded from the aggregate. It requires the same ordered calibration samples, padding-aware pooling, exact activation-layer identity, and recorded calibration/feature-width provenance. The biased estimator can be strongly upward-biased when feature width exceeds sample count, so high-dimensional values require a matched null baseline.
-- Task-vector energy requires an explicit shared base. Sign disagreement and TSV interference additionally require at least two candidate task vectors.
-- Configuration diagnosis does not execute MergeKit. It honours checkpoint identities, an explicit base, and scalar full-model weights, but does not model slice assembly, gradients, layer filters, tokenizer or embedding remapping, chat templates, output dtype effects, or complete method-specific semantics.
-- Source-similarity profiles are descriptive cosine measurements. They are not causal attribution and do not estimate how much a source contributed.
-- Full SVD is deliberately bounded by tensor element count and matrix dimension. Only numerical-rank directions are retained; a retained subspace spanning its ambient dimension is uninformative and reported unavailable. Resource-limited signals are reported as unavailable rather than approximated silently.
-- Sign and TSV values describe the complete candidate set relative to an explicit base. They are not copied into pair rows, do not enter pair assessments, and do not by themselves select a merge method.
-- Remote Hugging Face inputs are resolved once to an immutable commit SHA for metadata, config, and all shards. Local directories remain mutable and should be content-addressed externally for archival reproduction.
-- Lazy safetensors iteration reduces accumulation but does not imply a fixed peak-memory bound. Float32 conversions, task vectors, SVD workspaces, activations, report structures, and framework overhead also consume memory.
-- MergeKit parser acceptance establishes schema compatibility only. It does not establish that a proposed configuration is useful.
-- Every candidate merge still requires post-merge behavioural, capability, safety, and operational evaluation on the intended use case.
+- The checkpoints need compatible tensor names, shapes, and floating-point dtypes. Tensors with different shapes or non-floating dtypes are skipped. Supported floating dtypes are compared in float32, and the conversion is recorded.
+- Coverage may be partial when tensor names or shapes differ. MergeLens reports the missing coverage and withholds the aggregate score when it finds a known structural conflict.
+- Tensor metrics cannot tell you whether the merged model will retain capabilities, follow instructions, behave safely, or generate good output.
+- The aggregate weights, thresholds, risk tiers, and sensitivity band are hand-set. They have not been calibrated against a representative collection of real merge outcomes.
+- Linear CKA is optional and does not affect the aggregate score. It requires matching, ordered calibration samples and exact layer identity. Results can be misleading when there are far more features than samples, so high-dimensional comparisons need a matched baseline.
+- Task-vector energy needs an explicit shared base. Sign disagreement and TSV interference also need at least two candidate models.
+- Configuration diagnosis reads a limited part of a MergeKit file. It does not run the merge or fully model slices, gradients, layer filters, tokenizer changes, chat templates, output dtypes, or every method-specific option.
+- Source-similarity profiles are cosine measurements, not causal attribution. They do not measure how much a source model contributed.
+- Full SVD is limited by tensor size and matrix dimensions. Signals that exceed those limits are reported as unavailable instead of being silently approximated.
+- Sign and TSV metrics describe the full candidate set relative to one base. They are not pairwise scores and do not select a merge method on their own.
+- Hugging Face inputs are pinned to one commit for a run. Local directories can still change, so archive them separately if you need exact reproduction.
+- Lazy tensor loading reduces memory use but does not set a fixed upper bound. Conversions, task vectors, SVD workspaces, activations, reports, and framework overhead also use memory.
+- Passing the MergeKit parser only means that the generated configuration matches the schema. It does not mean the configuration will produce a useful model.
+
+Always test a completed merge on the behaviour, capabilities, safety checks, and operating conditions that matter for your use case.

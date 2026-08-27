@@ -5,11 +5,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/mergelens)](https://pypi.org/project/mergelens/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/shuhulx/mergelens/blob/main/LICENSE)
 
-MergeLens is an experimental inspection toolkit for homologous LLM checkpoints. It reports exact tensor coverage and weight, spectral, task-vector, and optional activation-similarity signals; highlights tensors worth inspecting; and proposes a rule-based MergeKit starting configuration. It is intended for model-merging researchers and engineers who need inspectable evidence before spending compute on candidate merges.
+MergeLens helps you inspect compatible LLM checkpoints before merging them. It checks tensor coverage and calculates weight, spectral, task-vector, and optional activation-similarity metrics. It can also draft a MergeKit configuration.
 
-MergeLens does **not** establish downstream merged-model quality, capability retention, or the best merge method. Its aggregate score and thresholds are hand-specified, unvalidated heuristics. Post-merge behavioural evaluation remains necessary.
+The metrics can point you towards tensors worth investigating, but they do not predict whether a merged model will perform well. The aggregate score uses hand-set rules that have not been validated against real merge outcomes. Always evaluate the merged model itself.
 
-Run a local software demonstration with tiny synthetic safetensors:
+To try it without downloading a model, run the synthetic example:
 
 ```bash
 pip install -e .
@@ -17,7 +17,7 @@ pip install -e '.[report]'
 python examples/synthetic_demo.py --output-dir demo-output
 ```
 
-The example is a software and known-answer demonstration, not scientific validation of merge outcomes.
+The example checks that the software works. It is not evidence that the scores predict merge quality.
 
 ## Install
 
@@ -36,17 +36,17 @@ mergelens compare model_a/ model_b/ --metric cosine_similarity --metric l2_dista
 mergelens compare model_a/ model_b/ --report report.html
 ```
 
-The result exposes:
+Each result includes:
 
-- the reference and candidate identity for every pair-tensor row;
-- separately attributable `candidate_set_metrics` for sign/TSV and `activation_metrics` for CKA;
-- total tensors and parameters, missing names, shape/dtype issues, and exact comparable coverage;
-- architecture metadata and known structural incompatibilities;
-- a status and reason for every computed, skipped, unavailable, failed, or resource-limited signal;
-- raw parameter-weighted heuristic components, with partial availability reducing component weight by parameter coverage;
+- the reference and candidate for every tensor comparison;
+- separate candidate-set metrics for sign/TSV and activation metrics for CKA;
+- tensor and parameter counts, missing names, shape or dtype mismatches, and comparable coverage;
+- architecture details and known structural conflicts;
+- a status and reason for metrics that were skipped, unavailable, failed, or limited by resources;
+- the raw components used by the aggregate heuristic;
 - a machine-readable `validation_status: heuristic_unvalidated`;
-- pair-bounded tensor inspection regions; and
-- an illustrative or parser-validated MergeKit starting configuration.
+- tensor regions that may deserve closer inspection; and
+- a MergeKit starting configuration, marked as either illustrative or parser-validated.
 
 Structurally unsupported comparisons retain their raw coverage and measurements but suppress aggregate scoring.
 
@@ -91,7 +91,7 @@ The composite heuristic is not counted as a separate diagnostic signal.
 | Task-vector energy | Pair tensor task vector | Fraction of spectral energy in retained leading values | Yes with an explicit base | No |
 | Linear CKA | Activation layer, optional | Exact activation-layer observations with calibration and feature-width provenance | Only when supplied | No |
 
-All SVD-backed signals use a conservative full-decomposition resource policy and retain only numerical-rank directions. Full-ambient subspaces are reported as uninformative. A metric skipped by the resource policy is reported as `resource_limit_skipped`; it is not silently converted into a plausible number.
+MergeLens only runs full SVDs on tensors within its size limits. It keeps numerical-rank directions and treats a subspace that fills the whole ambient space as uninformative. Tensors over the limit are reported as `resource_limit_skipped`; MergeLens does not substitute an approximation.
 
 ## MergeKit configuration diagnosis
 
@@ -99,9 +99,9 @@ All SVD-backed signals use a conservative full-decomposition resource policy and
 mergelens diagnose merge.yaml --json diagnosis.json
 ```
 
-Diagnosis honours checkpoint references, an explicit task-vector base, and finite non-negative scalar weights only for top-level full-model inputs. It discloses ignored or unsupported semantics such as slice assembly, gradients, tokenizer remapping, chat templates, and method-specific merge execution. Unknown merge methods fail closed instead of becoming `linear`.
+Diagnosis reads checkpoint references, an explicit task-vector base, and non-negative scalar weights from top-level full-model inputs. It does not model slices, gradients, tokenizer changes, chat templates, or every method-specific option. Unknown merge methods return an error instead of being treated as `linear`.
 
-Generated configurations follow current MergeKit model/parameter placement. They are marked `schema_validated` only when the installed MergeKit parser accepted them; otherwise they are marked `illustrative`.
+Generated configurations follow the current MergeKit model and parameter layout. A configuration is marked `schema_validated` only when the installed MergeKit parser accepts it; otherwise it is marked `illustrative`.
 
 ## Reports and MCP
 
@@ -122,7 +122,7 @@ The MCP server exposes seven tools: `compare_models`, `diagnose_merge`, `get_con
 
 ## Memory and reproducibility
 
-Safetensors are memory-mapped and aligned tensor groups are consumed lazily. No exact peak-memory multiplier is claimed: runtime memory also includes float32 conversions, task vectors, bounded SVD workspaces, activation tensors, result rows, report data, and framework overhead.
+Safetensors are memory-mapped and read lazily, so MergeLens does not keep every tensor in memory at once. Peak memory still depends on float32 conversions, task vectors, SVD workspaces, activations, result data, reports, and framework overhead.
 
 See [limitations](https://github.com/shuhulx/mergelens/blob/main/LIMITATIONS.md), [validation status](https://github.com/shuhulx/mergelens/blob/main/VALIDATION.md), [migration guidance](https://github.com/shuhulx/mergelens/blob/main/MIGRATION.md), and the [changelog](https://github.com/shuhulx/mergelens/blob/main/CHANGELOG.md) before interpreting results.
 

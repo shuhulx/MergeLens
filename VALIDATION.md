@@ -1,41 +1,31 @@
 # Validation status
 
-## Verified software properties
+## What the test suite covers
 
-The automated suite checks:
+The automated tests cover:
 
-- exact-shape rejection, including same-element-count tensors with different shapes;
-- deterministic tensor ordering with a full-name tie-breaker;
-- explicit missing-name, shape/dtype-mismatch, parameter, architecture, and immutable remote-revision coverage;
-- lazy iterator consumption without progress-path materialisation;
-- pair identity for implicit-reference, explicit-base, and multi-model comparisons;
-- pair-bounded tensor inspection regions and report grouping;
-- selective metric execution and structured unavailability reasons;
-- known-answer cosine, L2, sign, TSV, task-energy, numerical-rank trimming, scale invariance, zero-rank semantics, scalar tensors, non-finite rejection, and SVD resource-policy behaviour;
-- parameter-weighted partial metric availability and aggregate suppression for unsupported numeric evidence;
-- exact separation of pair-tensor, candidate-set, and activation-layer evidence;
-- linear CKA against an independent NumPy implementation, tiny-scale and orthogonal-transform invariance, unequal feature widths, sample-count/alignment validation, calibration identity, degeneracy rejection, and high-dimensional warnings;
-- padding-aware activation pooling;
-- fail-closed unknown MergeKit methods and configuration-scope disclosure;
-- actual use of the explicit base in task-vector construction;
-- generated YAML acceptance by the supported MergeKit parser in the validation job;
-- offline report generation with HTML-safe embedded chart specifications and spreadsheet-safe CSV export with status/reason columns;
-- package build, artifact inspection, fresh-wheel installation, dependency checks, MCP creation, and CLI smoke tests.
+- tensor matching, ordering, coverage, shape and dtype handling, and pinned remote revisions;
+- implicit references, explicit bases, multi-model comparisons, and correct model-pair attribution;
+- known-answer cases for cosine, L2, sign, TSV, task-vector energy, numerical rank, scale invariance, zero-rank tensors, scalar tensors, non-finite values, and SVD limits;
+- separation of pair, candidate-set, and activation metrics;
+- linear CKA against an independent NumPy implementation, including alignment checks, unequal feature widths, degenerate inputs, padding-aware pooling, and high-dimensional warnings;
+- selective metric execution and clear reasons for skipped or unavailable results;
+- aggregate-score suppression when the available evidence is not valid for scoring;
+- MergeKit parsing, explicit-base handling, unknown methods, and the stated limits of configuration diagnosis;
+- offline reports, HTML escaping, safe CSV output, and multi-model chart grouping; and
+- package building, wheel contents, clean installation, dependency checks, the CLI, and MCP server creation.
 
-These tests establish software properties within their fixtures and supported environments.
+These tests show that the software behaves as expected for the covered cases and supported environments.
 
-## Scientific validation completed
+## What has not been validated
 
-No prospective scientific validation of downstream merge prediction has been completed. The synthetic example demonstrates deterministic software behaviour only.
+MergeLens has not yet been tested as a predictor of real merge outcomes. The synthetic example only checks deterministic software behaviour.
 
-## Scientific validation not yet completed
+- The aggregate weights, thresholds, risk tiers, and sensitivity bands have not been calibrated.
+- The suggested MergeKit starting rules have not been calibrated.
+- There is no held-out evaluation across model families, architectures, scales, or fine-tuning methods.
+- False-positive and false-negative rates have not been measured on representative merges.
+- There are no external user studies or independent replications yet.
+- MergeLens does not predict capability, safety, or instruction-following retention.
 
-- prospective prediction of behavioural merge outcomes;
-- calibration of aggregate weights, score thresholds, risk tiers, or sensitivity bands;
-- calibration of merge-method starting rules;
-- evaluation across held-out checkpoint families, architectures, scales, and fine-tuning recipes;
-- false-positive and false-negative measurement on representative merges;
-- external user studies or independent replication;
-- prediction of capability, safety, or instruction-following retention.
-
-Until those studies exist, raw measurements and coverage are the primary evidence. The composite and strategy outputs must remain labelled `heuristic_unvalidated` and treated as hypotheses for post-merge testing.
+For now, treat the raw measurements and coverage as the main output. The aggregate score and strategy suggestions remain labelled `heuristic_unvalidated` and should be checked against the finished model.

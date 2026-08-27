@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1 - Package metadata
+
+- Updated the PyPI development status from Alpha to Beta.
+
 ## 2.0.0 - Major fixes
 
 ### Comparison results

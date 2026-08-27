@@ -27,7 +27,7 @@ def _models(tmp_path: Path, seeds: list[int]) -> list[str]:
 
 def test_two_model_implicit_reference_has_attributable_rows(tmp_models):
     result = compare_models(list(tmp_models), show_progress=False, metrics=["cosine_similarity"])
-    assert result.metadata["mergelens_version"] == "2.0.0"
+    assert result.metadata["mergelens_version"] == "2.0.1"
     assert result.reference_model.role == ModelRole.IMPLICIT_REFERENCE
     assert result.explicit_base is None
     assert len(result.coverage) == 1

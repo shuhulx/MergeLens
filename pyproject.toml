@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["llm", "model-merging", "diagnostics", "mergekit", "transformers", "machine-learning", "deep-learning", "model-merge", "weight-analysis", "compatibility", "neural-network"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",

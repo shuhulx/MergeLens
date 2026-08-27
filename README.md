@@ -58,7 +58,7 @@ from mergelens import compare_models
 result = compare_models(["model_a/", "model_b/"])
 
 print(result.coverage[0].parameter_coverage_reference)
-print(result.mci.score)              # float or None when suppressed
+print(result.mci.score)  # float or None when suppressed
 print(result.mci.risk_tier)
 print(result.mci.validation_status)  # heuristic_unvalidated
 

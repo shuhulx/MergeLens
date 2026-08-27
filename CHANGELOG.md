@@ -5,7 +5,7 @@
 - Changed the PyPI development status from Alpha to Beta.
 - Simplified the package description and documentation.
 
-There are no API or behaviour changes in this release.
+There are no API or behavior changes in this release.
 
 ## 2.0.0 - Major fixes
 

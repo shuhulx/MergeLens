@@ -16,4 +16,4 @@ MergeLens inspects checkpoints. It does not predict the quality of a finished me
 - Lazy tensor loading reduces memory use but does not set a fixed upper bound. Conversions, task vectors, SVD workspaces, activations, reports, and framework overhead also use memory.
 - Passing the MergeKit parser only means that the generated configuration matches the schema. It does not mean the configuration will produce a useful model.
 
-Always test a completed merge on the behaviour, capabilities, safety checks, and operating conditions that matter for your use case.
+Always test a completed merge on the behavior, capabilities, safety checks, and operating conditions that matter for your use case.

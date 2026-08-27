@@ -1,6 +1,6 @@
 # Migrating from 0.2.x to 2.0.0
 
-Version 2.0.0 includes breaking result-schema, CLI, configuration, and public API changes.
+Version 2.0.0 changed the result schema, CLI output, configuration handling, and public Python API.
 
 | 0.2.x concept | 2.0.0 replacement |
 |---|---|
@@ -13,19 +13,19 @@ Version 2.0.0 includes breaking result-schema, CLI, configuration, and public AP
 | confidence interval | `heuristic_band_lower` / `heuristic_band_upper`, a non-statistical sensitivity display |
 | KL divergence | experimental `weight_distribution_divergence`, excluded from default execution and aggregation |
 | attribution map | non-causal `source_similarity_profiles` |
-| cache / `--no-cache` | removed; no correctness-preserving cache was implemented |
-| capability-audit command and extra | removed; the subsystem was not implemented |
+| cache / `--no-cache` | removed; the cache was never completed |
+| capability-audit command and extra | removed; the feature was never completed |
 
-Deprecated Python constructor aliases remain temporarily for common result fields, but 2.0.0 serialization uses only the new names. CLI and report output use the new terminology.
+Common result fields still accept their old constructor names for now. Serialized 2.0.0 results, CLI output, and reports use only the new names.
 
-Metric selection now executes only the named signals:
+Only the metrics you name are calculated:
 
 ```python
 result = compare_models(models, metrics=["cosine_similarity", "l2_distance"])
 ```
 
-Activation CKA enters checkpoint comparison only through provenance-bearing
-`CKAComparison` objects returned by `compare_activations_cka`, passed in the
-`cka_comparisons` mapping. Plain score dictionaries are no longer accepted.
+Activation CKA must be passed as `CKAComparison` objects returned by
+`compare_activations_cka`. Add them to the `cka_comparisons` mapping; plain
+score dictionaries are no longer supported.
 
-Unknown MergeKit methods now raise a validation error instead of being treated as linear merging.
+Unknown MergeKit methods now return a validation error instead of falling back to linear merging.

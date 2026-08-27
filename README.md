@@ -7,7 +7,7 @@
 
 MergeLens helps you inspect compatible LLM checkpoints before merging them. It checks tensor coverage and calculates weight, spectral, task-vector, and optional activation-similarity metrics. It can also draft a MergeKit configuration.
 
-The metrics can point you towards tensors worth investigating, but they do not predict whether a merged model will perform well. The aggregate score uses hand-set rules that have not been validated against real merge outcomes. Always evaluate the merged model itself.
+The metrics can point you toward tensors worth investigating, but they do not predict whether a merged model will perform well. The aggregate score uses hand-set rules that have not been validated against real merge outcomes. Always evaluate the merged model itself.
 
 To try it without downloading a model, run the synthetic example:
 
@@ -38,17 +38,17 @@ mergelens compare model_a/ model_b/ --report report.html
 
 Each result includes:
 
-- the reference and candidate for every tensor comparison;
-- separate candidate-set metrics for sign/TSV and activation metrics for CKA;
-- tensor and parameter counts, missing names, shape or dtype mismatches, and comparable coverage;
-- architecture details and known structural conflicts;
-- a status and reason for metrics that were skipped, unavailable, failed, or limited by resources;
-- the raw components used by the aggregate heuristic;
-- a machine-readable `validation_status: heuristic_unvalidated`;
-- tensor regions that may deserve closer inspection; and
+- the reference and candidate for every tensor comparison.
+- separate candidate-set metrics for sign/TSV and activation metrics for CKA.
+- tensor and parameter counts, missing names, shape or dtype mismatches, and comparable coverage.
+- architecture details and known structural conflicts.
+- a status and reason for metrics that were skipped, unavailable, failed, or limited by resources.
+- the raw components used by the aggregate heuristic.
+- a machine-readable `validation_status: heuristic_unvalidated`.
+- tensor regions that may deserve closer inspection.
 - a MergeKit starting configuration, marked as either illustrative or parser-validated.
 
-Structurally unsupported comparisons retain their raw coverage and measurements but suppress aggregate scoring.
+When model structures are incompatible, MergeLens still reports coverage and raw measurements but does not calculate an aggregate score.
 
 Python API:
 
@@ -75,9 +75,9 @@ for signal in result.metric_availability:
     print(signal.metric, signal.status.value, signal.reason)
 ```
 
-## Nine underlying diagnostic signals
+## Diagnostic signals
 
-The composite heuristic is not counted as a separate diagnostic signal.
+MergeLens calculates nine underlying signals. The aggregate heuristic combines some of them and is not counted as a tenth signal.
 
 | Signal | Level | Direct object | Default | Composite |
 |---|---|---|---|---|

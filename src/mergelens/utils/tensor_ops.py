@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import torch
 
@@ -19,26 +21,60 @@ def flatten_to_2d(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.reshape(tensor.shape[0], -1)
 
 
-MAX_ELEMENTS_FOR_SVD: int = 50_000_000  # 50M elements; skip spectral metrics above this
+MAX_ELEMENTS_FOR_SVD: int = 2_000_000
+MAX_SVD_DIMENSION: int = 2_048
+
+
+class SVDResourceLimitError(ValueError):
+    """Raised when a full SVD would exceed the documented resource policy."""
+
+
+def _prepare_bounded_svd_input(matrix: torch.Tensor) -> torch.Tensor:
+    matrix = flatten_to_2d(matrix).float()
+    if matrix.numel() > MAX_ELEMENTS_FOR_SVD:
+        raise SVDResourceLimitError(
+            f"Tensor has {matrix.numel():,} elements, above the "
+            f"{MAX_ELEMENTS_FOR_SVD:,}-element full-SVD limit."
+        )
+    if min(matrix.shape) > MAX_SVD_DIMENSION:
+        raise SVDResourceLimitError(
+            f"Tensor minimum dimension is {min(matrix.shape):,}, above the "
+            f"{MAX_SVD_DIMENSION:,}-dimension full-SVD limit."
+        )
+    return matrix
+
+
+def bounded_full_svd(
+    matrix: torch.Tensor, k: int = 64
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run a bounded full SVD and return only the leading ``k`` outputs.
+
+    The decomposition itself is full, not truncated. The conservative input
+    policy prevents large tensors from silently entering a cubic-time path.
+    """
+
+    matrix = _prepare_bounded_svd_input(matrix)
+    retained_rank = min(k, min(matrix.shape))
+    u, singular_values, vh = torch.linalg.svd(matrix, full_matrices=False)
+    return u[:, :retained_rank], singular_values[:retained_rank], vh[:retained_rank, :]
+
+
+def bounded_singular_values(matrix: torch.Tensor) -> torch.Tensor:
+    """Return all singular values under the same bounded resource policy."""
+
+    return cast(torch.Tensor, torch.linalg.svdvals(_prepare_bounded_svd_input(matrix)))
 
 
 def truncated_svd(
     matrix: torch.Tensor, k: int = 64
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute truncated SVD, returning top-k singular vectors/values.
+    """Deprecated v0.2 name for :func:`bounded_full_svd`.
 
-    Returns (U[:, :k], S[:k], Vh[:k, :]) where k = min(k, min(matrix.shape)).
-    Raises ValueError if the matrix exceeds MAX_ELEMENTS_FOR_SVD.
+    This function never claimed algorithmic truncation in v0.3: it performs a
+    bounded full decomposition and slices the returned factors.
     """
-    matrix = flatten_to_2d(matrix).float()
-    if matrix.numel() > MAX_ELEMENTS_FOR_SVD:
-        raise ValueError(
-            f"Tensor too large for SVD ({matrix.numel():,} elements > "
-            f"{MAX_ELEMENTS_FOR_SVD:,} limit). Skipping spectral metrics."
-        )
-    k = min(k, min(matrix.shape))
-    U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
-    return U[:, :k], S[:k], Vh[:k, :]
+
+    return bounded_full_svd(matrix, k=k)
 
 
 def effective_rank(matrix: torch.Tensor) -> float:
@@ -49,13 +85,11 @@ def effective_rank(matrix: torch.Tensor) -> float:
     Higher effective rank = more distributed information.
     Returns float >= 1.0.
     """
-    matrix = flatten_to_2d(matrix).float()
-    S = torch.linalg.svdvals(matrix)
-    S = S[S > 1e-10]  # Filter near-zero
-    if len(S) == 0:
+    singular_values = bounded_singular_values(matrix)
+    singular_values = singular_values[singular_values > 1e-10]
+    if len(singular_values) == 0:
         return 1.0
-    # Normalize to probability distribution
-    p = S / S.sum()
+    p = singular_values / singular_values.sum()
     entropy = -(p * torch.log(p)).sum().item()
     return float(np.exp(entropy))
 
@@ -84,4 +118,10 @@ def grassmann_distance(U1: torch.Tensor, U2: torch.Tensor) -> float:
 
 def compute_task_vector(model_weights: torch.Tensor, base_weights: torch.Tensor) -> torch.Tensor:
     """Compute task vector: model_weights - base_weights."""
+
+    if model_weights.shape != base_weights.shape:
+        raise ValueError(
+            f"Exact tensor shape mismatch: {tuple(model_weights.shape)} vs "
+            f"{tuple(base_weights.shape)}"
+        )
     return model_weights.float() - base_weights.float()

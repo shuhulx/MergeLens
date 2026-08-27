@@ -1,4 +1,4 @@
-"""Model comparison module — layer-by-layer weight analysis."""
+"""Exact-coverage static checkpoint comparison."""
 
 from mergelens.compare.analyzer import compare_models
 

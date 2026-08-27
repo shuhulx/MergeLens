@@ -1,6 +1,5 @@
 """Tests for utils modules: tensor_ops and hf_utils."""
 
-
 import numpy as np
 import pytest
 import torch
@@ -80,7 +79,7 @@ class TestTruncatedSVD:
     def test_too_large_raises(self):
         side = int(np.sqrt(MAX_ELEMENTS_FOR_SVD)) + 1
         m = torch.randn(side, side)
-        with pytest.raises(ValueError, match="too large"):
+        with pytest.raises(ValueError, match="full-SVD limit"):
             truncated_svd(m)
 
     def test_1d_input(self):
@@ -214,7 +213,12 @@ class TestGetLocalMetadata:
 
 class TestEstimateParamsFromConfig:
     def test_full_config(self):
-        cfg = {"hidden_size": 64, "num_hidden_layers": 4, "vocab_size": 1000, "intermediate_size": 256}
+        cfg = {
+            "hidden_size": 64,
+            "num_hidden_layers": 4,
+            "vocab_size": 1000,
+            "intermediate_size": 256,
+        }
         params = _estimate_params_from_config(cfg)
         assert params is not None
         assert params > 0

@@ -1,31 +1,40 @@
-"""MergeLens data models — the API contract for all modules."""
+"""Public data models for MergeLens results and configuration analysis."""
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class MergeMethod(str, Enum):
-    """Supported merge methods."""
+    """MergeKit methods understood by the configuration parser."""
 
+    LINEAR = "linear"
     SLERP = "slerp"
+    NUSLERP = "nuslerp"
+    MULTISLERP = "multislerp"
+    KARCHER = "karcher"
+    TASK_ARITHMETIC = "task_arithmetic"
     TIES = "ties"
     DARE_TIES = "dare_ties"
     DARE_LINEAR = "dare_linear"
-    LINEAR = "linear"
-    PASSTHROUGH = "passthrough"
     DELLA = "della"
     DELLA_LINEAR = "della_linear"
-    MODEL_STOCK = "model_stock"
     BREADCRUMBS = "breadcrumbs"
     BREADCRUMBS_TIES = "breadcrumbs_ties"
+    SCE = "sce"
+    MODEL_STOCK = "model_stock"
+    NEARSWAP = "nearswap"
+    ARCEE_FUSION = "arcee_fusion"
+    PASSTHROUGH = "passthrough"
+    RAM = "ram"
+    RAMPLUS_TL = "ramplus_tl"
 
 
 class Severity(str, Enum):
-    """Conflict severity levels."""
+    """Heuristic inspection-priority levels."""
 
     LOW = "low"
     MEDIUM = "medium"
@@ -34,7 +43,7 @@ class Severity(str, Enum):
 
 
 class LayerType(str, Enum):
-    """Types of transformer layers."""
+    """Coarse tensor-role classifications inferred from tensor names."""
 
     ATTENTION_Q = "attn_q"
     ATTENTION_K = "attn_k"
@@ -49,158 +58,384 @@ class LayerType(str, Enum):
     OTHER = "other"
 
 
-# ── Per-Layer Results ─────────────────────────────────────────────
+class ModelRole(str, Enum):
+    """Role a checkpoint has in a comparison run."""
+
+    IMPLICIT_REFERENCE = "implicit_reference"
+    EXPLICIT_SHARED_BASE = "explicit_shared_base"
+    CANDIDATE = "candidate"
 
 
-class LayerMetrics(BaseModel):
-    """Metrics for a single layer comparison between two models."""
+class MetricStatus(str, Enum):
+    """Why a diagnostic signal is or is not present."""
 
-    layer_name: str
-    layer_type: LayerType = LayerType.OTHER
-    shape: tuple[int, ...] = ()
-    cosine_similarity: float = Field(ge=-1.0, le=1.0)
-    l2_distance: float = Field(ge=0.0)
-    kl_divergence: float | None = Field(default=None, ge=0.0)
-    # Optional — some require task vectors or activations
-    spectral_overlap: float | None = Field(default=None, ge=0.0, le=1.0)
-    effective_rank_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
-    sign_disagreement_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    tsv_interference: float | None = Field(default=None, ge=0.0)
-    task_vector_energy: float | None = Field(default=None, ge=0.0, le=1.0)
-    cka_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
+    COMPUTED = "computed"
+    SKIPPED_BY_USER = "skipped_by_user"
+    STRUCTURALLY_UNAVAILABLE = "structurally_unavailable"
+    FAILED_NUMERICALLY = "failed_numerically"
+    UNSUPPORTED_INPUT = "unsupported_input"
+    RESOURCE_LIMIT_SKIPPED = "resource_limit_skipped"
 
 
-# ── Conflict Zones ────────────────────────────────────────────────
+class MetricObservation(BaseModel):
+    """Availability of one signal for one tensor comparison."""
+
+    status: MetricStatus
+    reason: str | None = None
 
 
-class ConflictZone(BaseModel):
-    """A contiguous group of layers with high disagreement."""
+class MetricAvailability(BaseModel):
+    """Run-level availability summary for one diagnostic signal."""
 
-    start_layer: int
-    end_layer: int
-    layer_names: list[str]
-    severity: Severity
-    avg_cosine_sim: float
-    avg_sign_disagreement: float | None = None
-    recommendation: str
+    metric: str
+    status: MetricStatus
+    reason: str | None = None
+    computed_tensor_count: int = Field(default=0, ge=0)
+    affected_tensor_count: int = Field(default=0, ge=0)
 
 
-# ── Merge Compatibility Index ─────────────────────────────────────
+class TensorShapeMismatch(BaseModel):
+    """A same-name tensor pair that cannot be compared exactly."""
 
-
-class MergeCompatibilityIndex(BaseModel):
-    """Composite 0-100 score indicating merge compatibility."""
-
-    score: float = Field(ge=0.0, le=100.0)
-    confidence: float = Field(ge=0.0, le=1.0)
-    ci_lower: float = Field(ge=0.0, le=100.0)
-    ci_upper: float = Field(ge=0.0, le=100.0)
-    verdict: str  # "highly compatible", "compatible", "risky", "incompatible"
-    components: dict[str, float] = Field(default_factory=dict)
-
-
-# ── Strategy Recommendation ───────────────────────────────────────
-
-
-class StrategyRecommendation(BaseModel):
-    """Recommended merge strategy with generated config."""
-
-    method: MergeMethod
-    confidence: float = Field(ge=0.0, le=1.0)
-    reasoning: str
-    mergekit_yaml: str  # Ready-to-use MergeKit YAML
-    warnings: list[str] = Field(default_factory=list)
-    per_layer_overrides: dict[str, Any] = Field(default_factory=dict)
-
-
-# ── Compare Result ────────────────────────────────────────────────
+    tensor_name: str
+    reference_shape: tuple[int, ...]
+    candidate_shape: tuple[int, ...]
 
 
 class ModelInfo(BaseModel):
-    """Metadata about a model being compared."""
+    """Checkpoint metadata used to establish structural comparability."""
 
     name: str
     path_or_repo: str
+    role: ModelRole = ModelRole.CANDIDATE
     num_parameters: int | None = None
+    tensor_count: int | None = None
     architecture: str | None = None
+    hidden_size: int | None = None
     num_layers: int | None = None
+    vocab_size: int | None = None
+    embedding_shape: tuple[int, ...] | None = None
+    lm_head_shape: tuple[int, ...] | None = None
+
+
+class ComparisonCoverage(BaseModel):
+    """Exact tensor and parameter coverage for one checkpoint pair."""
+
+    comparison_id: str
+    reference_model: str
+    candidate_model: str
+    reference_role: ModelRole
+    total_tensor_count_reference: int = Field(ge=0)
+    total_tensor_count_candidate: int = Field(ge=0)
+    total_parameter_count_reference: int = Field(ge=0)
+    total_parameter_count_candidate: int = Field(ge=0)
+    common_tensor_name_count: int = Field(ge=0)
+    exact_shape_compatible_tensor_count: int = Field(ge=0)
+    common_parameter_count: int = Field(ge=0)
+    parameter_coverage_reference: float | None = Field(default=None, ge=0.0, le=1.0)
+    parameter_coverage_candidate: float | None = Field(default=None, ge=0.0, le=1.0)
+    tensors_missing_from_reference: list[str] = Field(default_factory=list)
+    tensors_missing_from_candidate: list[str] = Field(default_factory=list)
+    shape_mismatches: list[TensorShapeMismatch] = Field(default_factory=list)
+    reference_architecture: str | None = None
+    candidate_architecture: str | None = None
+    reference_hidden_size: int | None = None
+    candidate_hidden_size: int | None = None
+    reference_layer_count: int | None = None
+    candidate_layer_count: int | None = None
+    reference_vocab_size: int | None = None
+    candidate_vocab_size: int | None = None
+    embedding_compatible: bool | None = None
+    lm_head_compatible: bool | None = None
+    explicit_shared_base: bool = False
+    appears_homologous: bool = False
+    scoring_supported: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    unsupported_conditions: list[str] = Field(default_factory=list)
+
+
+class TensorMetrics(BaseModel):
+    """Diagnostic measurements for one exact-shape tensor pair."""
+
+    reference_model: str = ""
+    candidate_model: str = ""
+    comparison_id: str = ""
+    tensor_name: str = Field(validation_alias=AliasChoices("tensor_name", "layer_name"))
+    tensor_position: int = Field(default=0, ge=0)
+    transformer_block: int | None = Field(default=None, ge=0)
+    tensor_type: LayerType = Field(
+        default=LayerType.OTHER,
+        validation_alias=AliasChoices("tensor_type", "layer_type"),
+    )
+    shape: tuple[int, ...] = ()
+    parameter_count: int = Field(default=0, ge=0)
+    cosine_similarity: float | None = Field(default=None, ge=-1.0, le=1.0)
+    l2_distance: float | None = Field(default=None, ge=0.0)
+    weight_distribution_divergence: float | None = Field(
+        default=None,
+        ge=0.0,
+        validation_alias=AliasChoices("weight_distribution_divergence", "kl_divergence"),
+    )
+    spectral_overlap: float | None = Field(default=None, ge=0.0, le=1.0)
+    effective_rank_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    sign_disagreement_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    tsv_interference: float | None = Field(default=None, ge=0.0, le=1.0)
+    task_vector_energy: float | None = Field(default=None, ge=0.0, le=1.0)
+    cka_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
+    metric_observations: dict[str, MetricObservation] = Field(default_factory=dict)
+
+    @property
+    def layer_name(self) -> str:
+        """Deprecated alias for ``tensor_name``."""
+
+        return self.tensor_name
+
+    @property
+    def layer_type(self) -> LayerType:
+        """Deprecated alias for ``tensor_type``."""
+
+        return self.tensor_type
+
+    @property
+    def kl_divergence(self) -> float | None:
+        """Deprecated alias for the descriptive directional divergence."""
+
+        return self.weight_distribution_divergence
+
+
+LayerMetrics = TensorMetrics
+
+
+class TensorConflictRegion(BaseModel):
+    """A contiguous ordered-tensor region prioritized for inspection."""
+
+    comparison_id: str = ""
+    reference_model: str = ""
+    candidate_model: str = ""
+    start_tensor_position: int = Field(
+        default=0, validation_alias=AliasChoices("start_tensor_position", "start_layer")
+    )
+    end_tensor_position: int = Field(
+        default=0, validation_alias=AliasChoices("end_tensor_position", "end_layer")
+    )
+    tensor_names: list[str] = Field(
+        default_factory=list, validation_alias=AliasChoices("tensor_names", "layer_names")
+    )
+    severity: Severity
+    avg_cosine_similarity: float = Field(
+        validation_alias=AliasChoices("avg_cosine_similarity", "avg_cosine_sim")
+    )
+    avg_sign_disagreement: float | None = None
+    triggering_signals: list[str] = Field(default_factory=list)
+    heuristic_inspection_note: str = Field(
+        validation_alias=AliasChoices("heuristic_inspection_note", "recommendation")
+    )
+
+    @property
+    def start_layer(self) -> int:
+        return self.start_tensor_position
+
+    @property
+    def end_layer(self) -> int:
+        return self.end_tensor_position
+
+    @property
+    def layer_names(self) -> list[str]:
+        return self.tensor_names
+
+    @property
+    def avg_cosine_sim(self) -> float:
+        return self.avg_cosine_similarity
+
+    @property
+    def recommendation(self) -> str:
+        return self.heuristic_inspection_note
+
+
+ConflictZone = TensorConflictRegion
+
+
+class MergeCompatibilityIndex(BaseModel):
+    """Unvalidated, hand-specified summary of static diagnostic signals."""
+
+    score: float | None = Field(default=None, ge=0.0, le=100.0)
+    risk_tier: str = "insufficient_evidence"
+    evidence_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    available_metrics: list[str] = Field(default_factory=list)
+    unavailable_metrics: list[MetricAvailability] = Field(default_factory=list)
+    heuristic_band_lower: float | None = Field(default=None, ge=0.0, le=100.0)
+    heuristic_band_upper: float | None = Field(default=None, ge=0.0, le=100.0)
+    validation_status: Literal["heuristic_unvalidated"] = "heuristic_unvalidated"
+    components: dict[str, float] = Field(default_factory=dict)
+    component_weights: dict[str, float] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_v02_names(cls, value: Any) -> Any:
+        """Accept v0.2 constructor names without serializing misleading labels."""
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        data.setdefault("evidence_coverage", data.pop("confidence", 0.0))
+        data.setdefault("heuristic_band_lower", data.pop("ci_lower", None))
+        data.setdefault("heuristic_band_upper", data.pop("ci_upper", None))
+        old_verdict = data.pop("verdict", None)
+        if old_verdict and "risk_tier" not in data:
+            data["risk_tier"] = str(old_verdict).replace(" ", "_")
+        return data
+
+    @property
+    def confidence(self) -> float:
+        """Deprecated non-statistical alias for evidence coverage."""
+
+        return self.evidence_coverage
+
+    @property
+    def ci_lower(self) -> float:
+        """Deprecated alias for the non-statistical heuristic band."""
+
+        return self.heuristic_band_lower or 0.0
+
+    @property
+    def ci_upper(self) -> float:
+        """Deprecated alias for the non-statistical heuristic band."""
+
+        return self.heuristic_band_upper or 0.0
+
+    @property
+    def verdict(self) -> str:
+        """Deprecated alias for ``risk_tier``."""
+
+        return self.risk_tier
+
+
+class StrategyRecommendation(BaseModel):
+    """Rule-based MergeKit starting point; not an outcome prediction."""
+
+    method: MergeMethod
+    heuristic_strength: float = Field(
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("heuristic_strength", "confidence"),
+    )
+    reasoning: str
+    triggering_signals: list[str] = Field(default_factory=list)
+    mergekit_yaml: str
+    config_status: Literal["illustrative", "schema_validated"] = "illustrative"
+    validated_against: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    per_tensor_overrides: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("per_tensor_overrides", "per_layer_overrides"),
+    )
+
+    @property
+    def confidence(self) -> float:
+        """Deprecated alias; this is heuristic rule strength, not confidence."""
+
+        return self.heuristic_strength
+
+    @property
+    def per_layer_overrides(self) -> dict[str, Any]:
+        return self.per_tensor_overrides
 
 
 class CompareResult(BaseModel):
-    """Full output of compare.models()."""
+    """Complete comparison result with explicit evidence boundaries."""
 
     models: list[ModelInfo]
-    layer_metrics: list[LayerMetrics]
-    conflict_zones: list[ConflictZone]
+    reference_model: ModelInfo | None = None
+    explicit_base: ModelInfo | None = None
+    coverage: list[ComparisonCoverage] = Field(default_factory=list)
+    tensor_metrics: list[TensorMetrics] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("tensor_metrics", "layer_metrics"),
+    )
+    tensor_conflict_regions: list[TensorConflictRegion] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("tensor_conflict_regions", "conflict_zones"),
+    )
     mci: MergeCompatibilityIndex
+    pair_assessments: dict[str, MergeCompatibilityIndex] = Field(default_factory=dict)
+    metric_availability: list[MetricAvailability] = Field(default_factory=list)
     strategy: StrategyRecommendation | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def layer_metrics(self) -> list[TensorMetrics]:
+        """Deprecated alias for ``tensor_metrics``."""
 
-# ── Diagnose Result ───────────────────────────────────────────────
+        return self.tensor_metrics
+
+    @property
+    def conflict_zones(self) -> list[TensorConflictRegion]:
+        """Deprecated alias for ``tensor_conflict_regions``."""
+
+        return self.tensor_conflict_regions
 
 
 class MergeConfig(BaseModel):
-    """Parsed MergeKit configuration."""
+    """Parsed subset of a MergeKit configuration."""
 
     merge_method: MergeMethod
     base_model: str | None = None
     models: list[str]
+    model_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     slices: list[dict[str, Any]] | None = None
+    tokenizer: dict[str, Any] | None = None
+    tokenizer_source: str | None = None
+    chat_template: str | None = None
+    dtype: str | None = None
+    honored_features: list[str] = Field(default_factory=list)
+    ignored_features: list[str] = Field(default_factory=list)
+    unsupported_features: list[str] = Field(default_factory=list)
     raw_yaml: str = ""
 
 
 class InterferenceScore(BaseModel):
-    """Interference measurement for a layer."""
+    """Descriptive task-vector or equal-average conflict proxy for one tensor."""
 
-    layer_name: str
+    tensor_name: str = Field(validation_alias=AliasChoices("tensor_name", "layer_name"))
     score: float = Field(ge=0.0, le=1.0)
-    source_contributions: dict[str, float] = Field(default_factory=dict)
+    source_similarity_profile: dict[str, float] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("source_similarity_profile", "source_contributions"),
+    )
+
+    @property
+    def layer_name(self) -> str:
+        return self.tensor_name
+
+    @property
+    def source_contributions(self) -> dict[str, float]:
+        """Deprecated alias; values are similarities, not causal contributions."""
+
+        return self.source_similarity_profile
 
 
 class DiagnoseResult(BaseModel):
-    """Full output of diagnose.from_config()."""
+    """Configuration diagnosis with an explicit simulation-scope disclosure."""
 
     config: MergeConfig
     interference_scores: list[InterferenceScore]
-    attribution_map: dict[str, dict[str, float]] = Field(default_factory=dict)
-    conflict_zones: list[ConflictZone] = Field(default_factory=list)
+    source_similarity_profiles: dict[str, dict[str, float]] = Field(default_factory=dict)
+    tensor_conflict_regions: list[TensorConflictRegion] = Field(default_factory=list)
     overall_interference: float = Field(ge=0.0, le=1.0)
+    analysis_status: str = "descriptive_proxy_only"
+    honored_features: list[str] = Field(default_factory=list)
+    ignored_features: list[str] = Field(default_factory=list)
+    unsupported_features: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
 
+    @property
+    def attribution_map(self) -> dict[str, dict[str, float]]:
+        """Deprecated alias for non-causal similarity profiles."""
 
-# ── Audit Result ──────────────────────────────────────────────────
+        return self.source_similarity_profiles
 
-
-class ProbeResult(BaseModel):
-    """Result of a single probe evaluation."""
-
-    probe_id: str
-    category: str
-    prompt: str
-    response: str
-    score: float = Field(ge=0.0, le=1.0)
-    judge_reasoning: str | None = None
-
-
-class CapabilityScore(BaseModel):
-    """Aggregated score for a capability category."""
-
-    category: str
-    base_score: float = Field(ge=0.0, le=1.0)
-    merged_score: float = Field(ge=0.0, le=1.0)
-    retention: float = Field(ge=0.0)  # merged/base ratio
-    num_probes: int
-
-
-class AuditResult(BaseModel):
-    """Full output of audit.run()."""
-
-    base_model: str
-    merged_model: str
-    capability_scores: list[CapabilityScore]
-    probe_results: list[ProbeResult] = Field(default_factory=list)
-    overall_retention: float = Field(ge=0.0)
-    regressions: list[str] = Field(default_factory=list)
-    improvements: list[str] = Field(default_factory=list)
+    @property
+    def conflict_zones(self) -> list[TensorConflictRegion]:
+        return self.tensor_conflict_regions

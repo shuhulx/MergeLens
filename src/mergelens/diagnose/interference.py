@@ -1,4 +1,4 @@
-"""Interference scoring — measures how much models conflict during merging."""
+"""Descriptive interference proxies with explicit shared-base handling."""
 
 from __future__ import annotations
 
@@ -7,68 +7,75 @@ import torch
 from mergelens.compare.loader import ModelHandle, find_common_tensors
 from mergelens.compare.metrics import cosine_similarity
 from mergelens.models import InterferenceScore
+from mergelens.utils.tensor_ops import compute_task_vector
 
 
 def compute_interference(
-    handles: list[ModelHandle],
-    base_model: str | None = None,
-    device: str = "cpu",
+    source_handles: list[ModelHandle],
+    *,
+    base_handle: ModelHandle | None = None,
+    weights: list[float] | None = None,
 ) -> list[InterferenceScore]:
-    """Compute per-layer interference scores.
+    """Compute a static proxy from task vectors or equal-checkpoint deviations.
 
-    Interference = 1 - cosine_sim(merged_layer, weighted_avg_of_sources)
-    Measures how much the merge deviates from simple averaging.
-
-    For pre-merge prediction: uses task vector overlap to predict problematic layers.
+    With ``base_handle``, task vectors are constructed from that exact handle.
+    Without one, the score is only a deviation-from-weighted-average proxy.
     """
-    if len(handles) < 2:
+
+    if len(source_handles) < 2:
         return []
+    normalized_weights = _normalize_weights(weights, len(source_handles))
+    handles = [base_handle, *source_handles] if base_handle is not None else source_handles
+    common_names = find_common_tensors(handles)
+    scores: list[InterferenceScore] = []
 
-    common = find_common_tensors(handles)
-    scores = []
+    for name in common_names:
+        source_tensors = [handle.get_tensor(name) for handle in source_handles]
+        weighted_average = sum(
+            tensor.float() * weight for tensor, weight in zip(source_tensors, normalized_weights)
+        )
+        similarity_profile = {
+            handle.path_or_repo: round(cosine_similarity(tensor, weighted_average), 4)
+            for handle, tensor in zip(source_handles, source_tensors)
+        }
 
-    for name in common:
-        tensors = [h.get_tensor(name) for h in handles]
-
-        # Compute weighted average (equal weights)
-        avg = torch.stack([t.float() for t in tensors]).mean(dim=0)
-
-        # Interference per source
-        contributions = {}
-        for _i, (h, t) in enumerate(zip(handles, tensors)):
-            cos = cosine_similarity(t, avg)
-            contributions[h.info.name] = round(cos, 4)
-
-        # Task vector interference
-        base_t = tensors[0].float()
-        task_vecs = [t.float() - base_t for t in tensors[1:]]
-
-        if len(task_vecs) >= 2 and task_vecs[0].numel() > 0:
-            # Average pairwise task vector cosine similarity
-            pair_count = 0
-            tv_cos_sum = 0.0
-            for i in range(len(task_vecs)):
-                for j in range(i + 1, len(task_vecs)):
-                    tv_cos_sum += cosine_similarity(task_vecs[i], task_vecs[j])
-                    pair_count += 1
-            tv_cos_avg = tv_cos_sum / pair_count
-            # High similarity = low interference, negative = high interference
-            interference = max(0.0, min(1.0, (1.0 - tv_cos_avg) / 2.0))
+        if base_handle is not None:
+            base_tensor = base_handle.get_tensor(name)
+            task_vectors = [compute_task_vector(tensor, base_tensor) for tensor in source_tensors]
+            pairwise = _pairwise_cosines(task_vectors)
+            interference = (1.0 - sum(pairwise) / len(pairwise)) / 2.0
         else:
-            # Single task vector: use magnitude as proxy
-            interference = 0.0
-            for tv in task_vecs:
-                norm = torch.norm(tv).item()
-                base_norm = torch.norm(base_t).item()
-                if base_norm > 1e-10:
-                    interference = max(interference, min(1.0, norm / base_norm))
+            deviations = [
+                1.0 - cosine_similarity(tensor, weighted_average) for tensor in source_tensors
+            ]
+            interference = sum(deviations) / (2.0 * len(deviations))
 
         scores.append(
             InterferenceScore(
-                layer_name=name,
-                score=round(float(interference), 4),
-                source_contributions=contributions,
+                tensor_name=name,
+                score=round(max(0.0, min(1.0, float(interference))), 4),
+                source_similarity_profile=similarity_profile,
             )
         )
-
     return scores
+
+
+def _normalize_weights(weights: list[float] | None, count: int) -> list[float]:
+    if weights is None:
+        return [1.0 / count] * count
+    if len(weights) != count:
+        raise ValueError(f"Expected {count} source weights, received {len(weights)}.")
+    total = sum(weights)
+    if abs(total) <= 1e-12:
+        raise ValueError("Source weights must not sum to zero.")
+    return [weight / total for weight in weights]
+
+
+def _pairwise_cosines(task_vectors: list[torch.Tensor]) -> list[float]:
+    values: list[float] = []
+    for index, first in enumerate(task_vectors):
+        for second in task_vectors[index + 1 :]:
+            values.append(cosine_similarity(first, second))
+    if not values:
+        raise ValueError("At least two task vectors are required.")
+    return values

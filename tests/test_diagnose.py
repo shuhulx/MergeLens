@@ -1,167 +1,66 @@
-"""Tests for diagnose module — interference scoring and attribution."""
+"""Tests for explicit-base interference and non-causal source similarity."""
 
-import pytest
+import torch
 
-from mergelens.compare.loader import ModelHandle, find_common_tensors
-from mergelens.diagnose.attribution import compute_attribution
+from mergelens.compare.loader import ModelHandle
+from mergelens.diagnose.attribution import compute_source_similarity_profile
 from mergelens.diagnose.interference import compute_interference
-from mergelens.models import InterferenceScore
-
-# ── Interference ─────────────────────────────────────────────────
+from tests.conftest import _create_tiny_model
 
 
-def test_interference_returns_empty_for_single_model(tmp_model_path):
-    h = ModelHandle(tmp_model_path)
-    scores = compute_interference([h])
-    assert scores == []
+def test_interference_requires_two_sources(tmp_model_path):
+    assert compute_interference([ModelHandle(tmp_model_path)]) == []
 
 
-def test_interference_returns_scores_for_two_models(tmp_models):
-    a, b = tmp_models
-    ha, hb = ModelHandle(a), ModelHandle(b)
-    scores = compute_interference([ha, hb])
-    assert len(scores) > 0
-    assert all(isinstance(s, InterferenceScore) for s in scores)
+def test_explicit_base_changes_task_vector_construction(tmp_path):
+    paths = []
+    for index, seed in enumerate([1, 2, 3, 4]):
+        path = tmp_path / str(index)
+        path.mkdir()
+        _create_tiny_model(path, seed=seed, hidden=8, layers=1)
+        paths.append(str(path))
+    sources = [ModelHandle(paths[0]), ModelHandle(paths[1])]
+    first = compute_interference(sources, base_handle=ModelHandle(paths[2]))
+    second = compute_interference(sources, base_handle=ModelHandle(paths[3]))
+    assert [item.score for item in first] != [item.score for item in second]
 
 
-def test_interference_scores_bounded(tmp_models):
-    a, b = tmp_models
-    ha, hb = ModelHandle(a), ModelHandle(b)
-    scores = compute_interference([ha, hb])
-    for s in scores:
-        assert 0.0 <= s.score <= 1.0
+def test_scalar_model_weights_affect_no_base_proxy(tmp_models):
+    sources = [ModelHandle(path) for path in tmp_models]
+    equal = compute_interference(sources, weights=[0.5, 0.5])
+    skewed = compute_interference(sources, weights=[0.9, 0.1])
+    assert [item.score for item in equal] != [item.score for item in skewed]
 
 
-def test_interference_identical_models_low(tmp_identical_models):
-    a, b = tmp_identical_models
-    ha, hb = ModelHandle(a), ModelHandle(b)
-    scores = compute_interference([ha, hb])
-    for s in scores:
-        assert s.score < 0.01
+def test_source_similarity_profile_is_raw_not_normalized(tmp_models):
+    first, second = [ModelHandle(path) for path in tmp_models]
+    profiles = compute_source_similarity_profile(first, [first, second])
+    assert profiles
+    assert all(profile[first.path_or_repo] == 1.0 for profile in profiles.values())
+    assert any(abs(sum(profile.values()) - 1.0) > 0.1 for profile in profiles.values())
+    assert any(value < 0 for profile in profiles.values() for value in profile.values())
 
 
-def test_interference_source_contributions_present(tmp_models):
-    a, b = tmp_models
-    ha, hb = ModelHandle(a), ModelHandle(b)
-    scores = compute_interference([ha, hb])
-    for s in scores:
-        assert len(s.source_contributions) == 2
+def test_task_vector_interference_is_bounded(tmp_path):
+    paths = []
+    for index, seed in enumerate([10, 11, 12]):
+        path = tmp_path / str(index)
+        path.mkdir()
+        _create_tiny_model(path, seed=seed, hidden=8, layers=1)
+        paths.append(str(path))
+    scores = compute_interference(
+        [ModelHandle(paths[1]), ModelHandle(paths[2])], base_handle=ModelHandle(paths[0])
+    )
+    assert scores
+    assert all(0 <= item.score <= 1 for item in scores)
+    assert all(item.source_similarity_profile for item in scores)
 
 
-def test_interference_covers_all_common_layers(tmp_models):
-    a, b = tmp_models
-    ha, hb = ModelHandle(a), ModelHandle(b)
-    common = find_common_tensors([ha, hb])
-    scores = compute_interference([ha, hb])
-    score_names = {s.layer_name for s in scores}
-    assert score_names == set(common)
-
-
-def test_interference_three_models(tmp_path):
-    from tests.conftest import _create_tiny_model
-
-    dirs = []
-    for i, seed in enumerate([42, 123, 999]):
-        d = tmp_path / f"model_{i}"
-        d.mkdir()
-        _create_tiny_model(d, seed=seed)
-        dirs.append(str(d))
-
-    handles = [ModelHandle(d) for d in dirs]
-    scores = compute_interference(handles)
-    assert len(scores) > 0
-    for s in scores:
-        assert 0.0 <= s.score <= 1.0
-        assert len(s.source_contributions) == 3
-
-
-def test_interference_layer_name_matches(tmp_models):
-    a, b = tmp_models
-    ha, hb = ModelHandle(a), ModelHandle(b)
-    scores = compute_interference([ha, hb])
-    for s in scores:
-        assert isinstance(s.layer_name, str)
-        assert len(s.layer_name) > 0
-
-
-# ── Attribution ──────────────────────────────────────────────────
-
-
-def test_attribution_returns_dict(tmp_models):
-    a, b = tmp_models
-    merged = ModelHandle(a)
-    sources = [ModelHandle(b)]
-    result = compute_attribution(merged, sources)
-    assert isinstance(result, dict)
-    assert len(result) > 0
-
-
-def test_attribution_contributions_sum_to_one(tmp_models):
-    a, b = tmp_models
-    merged = ModelHandle(a)
-    sources = [ModelHandle(a), ModelHandle(b)]
-    result = compute_attribution(merged, sources)
-    for _layer, contribs in result.items():
-        total = sum(contribs.values())
-        assert total == pytest.approx(1.0, abs=0.01)
-
-
-def test_attribution_merged_matches_source_high(tmp_identical_models):
-    a, b = tmp_identical_models
-    merged = ModelHandle(a)
-    sources = [ModelHandle(a), ModelHandle(b)]
-    result = compute_attribution(merged, sources)
-    for _layer, contribs in result.items():
-        for _name, score in contribs.items():
-            assert score == pytest.approx(0.5, abs=0.01)
-
-
-def test_attribution_self_dominates(tmp_models):
-    a, b = tmp_models
-    merged = ModelHandle(a)
-    sources = [ModelHandle(a), ModelHandle(b)]
-    result = compute_attribution(merged, sources)
-    merged_name = merged.info.name
-    other_name = sources[1].info.name
-    for _layer, contribs in result.items():
-        assert contribs[merged_name] >= contribs[other_name]
-
-
-def test_attribution_covers_common_layers(tmp_models):
-    a, b = tmp_models
-    merged = ModelHandle(a)
-    sources = [ModelHandle(b)]
-    all_handles = [merged, *sources]
-    common = find_common_tensors(all_handles)
-    result = compute_attribution(merged, sources)
-    assert set(result.keys()) == set(common)
-
-
-def test_attribution_values_non_negative(tmp_models):
-    a, b = tmp_models
-    merged = ModelHandle(a)
-    sources = [ModelHandle(a), ModelHandle(b)]
-    result = compute_attribution(merged, sources)
-    for _layer, contribs in result.items():
-        for _name, score in contribs.items():
-            assert score >= 0.0
-
-
-def test_attribution_three_sources(tmp_path):
-    from tests.conftest import _create_tiny_model
-
-    dirs = []
-    for i, seed in enumerate([42, 123, 999]):
-        d = tmp_path / f"model_{i}"
-        d.mkdir()
-        _create_tiny_model(d, seed=seed)
-        dirs.append(str(d))
-
-    merged = ModelHandle(dirs[0])
-    sources = [ModelHandle(d) for d in dirs[1:]]
-    result = compute_attribution(merged, sources)
-    assert len(result) > 0
-    for _layer, contribs in result.items():
-        assert len(contribs) == 2
-        total = sum(contribs.values())
-        assert total == pytest.approx(1.0, abs=0.01)
+def test_zero_sum_weights_are_rejected(tmp_models):
+    sources = [ModelHandle(path) for path in tmp_models]
+    try:
+        compute_interference(sources, weights=[1.0, -1.0])
+    except ValueError as exc:
+        assert "sum to zero" in str(exc)
+    else:
+        raise AssertionError("zero-sum source weights were accepted")

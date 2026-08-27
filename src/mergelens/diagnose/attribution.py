@@ -1,51 +1,36 @@
-"""Source model contribution decomposition — which model 'won' each layer."""
+"""Non-causal source-similarity profiles for an existing merged checkpoint."""
 
 from __future__ import annotations
-
-import logging
 
 from mergelens.compare.loader import ModelHandle, find_common_tensors
 from mergelens.compare.metrics import cosine_similarity
 
-logger = logging.getLogger(__name__)
+
+def compute_source_similarity_profile(
+    merged_handle: ModelHandle,
+    source_handles: list[ModelHandle],
+) -> dict[str, dict[str, float]]:
+    """Return raw cosine similarities to each source for every comparable tensor.
+
+    These values do not estimate causal contribution and are not normalized to
+    imply that a source "won" a tensor.
+    """
+
+    common_names = find_common_tensors([merged_handle, *source_handles])
+    profiles: dict[str, dict[str, float]] = {}
+    for name in common_names:
+        merged_tensor = merged_handle.get_tensor(name)
+        profiles[name] = {
+            source.path_or_repo: round(cosine_similarity(merged_tensor, source.get_tensor(name)), 4)
+            for source in source_handles
+        }
+    return profiles
 
 
 def compute_attribution(
     merged_handle: ModelHandle,
     source_handles: list[ModelHandle],
 ) -> dict[str, dict[str, float]]:
-    """Compute per-layer attribution: how much each source contributed to the merged result.
+    """Deprecated alias for :func:`compute_source_similarity_profile`."""
 
-    Uses cosine similarity between merged weights and each source's weights.
-    Returns {layer_name: {source_name: contribution_score}}.
-    """
-    all_handles = [merged_handle, *source_handles]
-    common = find_common_tensors(all_handles)
-
-    attribution = {}
-
-    for name in common:
-        merged_tensor = merged_handle.get_tensor(name)
-
-        similarities = {}
-        for sh in source_handles:
-            source_tensor = sh.get_tensor(name)
-            sim = cosine_similarity(merged_tensor, source_tensor)
-            similarities[sh.info.name] = sim
-
-        # Normalize to contributions that sum to ~1
-        total = sum(max(0.0, v) for v in similarities.values())
-        if total > 0:
-            contributions = {k: round(max(0.0, v) / total, 4) for k, v in similarities.items()}
-        else:
-            logger.error(
-                "All source contributions are negative for layer '%s'; "
-                "merged layer is dissimilar to ALL sources. "
-                "Falling back to uniform distribution.",
-                name,
-            )
-            contributions = {k: round(1.0 / len(similarities), 4) for k in similarities}
-
-        attribution[name] = contributions
-
-    return attribution
+    return compute_source_similarity_profile(merged_handle, source_handles)

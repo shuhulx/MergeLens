@@ -41,6 +41,7 @@ def _create_tiny_model(path: Path, seed: int = 42, hidden: int = 32, layers: int
 
     # Write a minimal config.json
     import json
+
     config = {
         "model_type": "llama",
         "hidden_size": hidden,

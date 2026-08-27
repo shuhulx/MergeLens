@@ -1,165 +1,111 @@
-"""Tests for activation-level comparison (CKA) and extraction."""
+"""Known-answer tests for activation extraction and linear CKA provenance."""
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
 from mergelens.activations.cka import compare_activations_cka
-from mergelens.activations.extractor import ActivationExtractor
+from mergelens.activations.extractor import ActivationExtractor, ActivationSet
+from mergelens.compare.metrics import cka_similarity
 
 
-class TestCompareActivationsCKA:
-    def test_identical_activations(self):
-        acts = {"layer.0": torch.randn(50, 32), "layer.1": torch.randn(50, 64)}
-        result = compare_activations_cka(acts, acts)
-        assert set(result.keys()) == {"layer.0", "layer.1"}
-        for score in result.values():
-            assert score == pytest.approx(1.0, abs=1e-3)
-
-    def test_random_activations_bounded(self):
-        acts_a = {"layer.0": torch.randn(50, 32), "layer.1": torch.randn(50, 64)}
-        acts_b = {"layer.0": torch.randn(50, 32), "layer.1": torch.randn(50, 64)}
-        result = compare_activations_cka(acts_a, acts_b)
-        for score in result.values():
-            assert 0.0 <= score <= 1.0
-
-    def test_only_common_layers(self):
-        acts_a = {"layer.0": torch.randn(50, 32), "layer.2": torch.randn(50, 32)}
-        acts_b = {"layer.0": torch.randn(50, 32), "layer.1": torch.randn(50, 32)}
-        result = compare_activations_cka(acts_a, acts_b)
-        assert list(result.keys()) == ["layer.0"]
-
-    def test_no_common_layers(self):
-        acts_a = {"layer.0": torch.randn(50, 32)}
-        acts_b = {"layer.1": torch.randn(50, 32)}
-        result = compare_activations_cka(acts_a, acts_b)
-        assert result == {}
-
-    def test_mismatched_samples_truncated(self):
-        acts_a = {"layer.0": torch.randn(30, 32)}
-        acts_b = {"layer.0": torch.randn(50, 32)}
-        result = compare_activations_cka(acts_a, acts_b)
-        assert "layer.0" in result
-        assert 0.0 <= result["layer.0"] <= 1.0
-
-    def test_scores_rounded(self):
-        acts = {"layer.0": torch.randn(50, 32)}
-        result = compare_activations_cka(acts, acts)
-        score_str = str(result["layer.0"])
-        decimals = score_str.split(".")[-1] if "." in score_str else ""
-        assert len(decimals) <= 4
-
-    def test_orthogonal_activations_low(self):
-        n = 50
-        a = torch.zeros(n, 4)
-        a[:, 0] = torch.randn(n)
-        b = torch.zeros(n, 4)
-        b[:, 2] = torch.randn(n)
-        result = compare_activations_cka({"layer.0": a}, {"layer.0": b})
-        assert result["layer.0"] < 0.3
+def _set(activations, calibration_id="calibration"):
+    sample_count = next(iter(activations.values())).shape[0] if activations else 0
+    return ActivationSet(activations, calibration_id, sample_count)
 
 
-class TestActivationExtractor:
-    def _make_model(self):
-        model = nn.Sequential()
-        model.add_module("linear1", nn.Linear(16, 32))
-        model.add_module("relu", nn.ReLU())
-        model.add_module("linear2", nn.Linear(32, 8))
-        return model
+def _numpy_linear_cka(first: np.ndarray, second: np.ndarray) -> float:
+    x = first - first.mean(axis=0, keepdims=True)
+    y = second - second.mean(axis=0, keepdims=True)
+    numerator = np.linalg.norm(x.T @ y, ord="fro") ** 2
+    denominator = np.linalg.norm(x.T @ x, ord="fro") * np.linalg.norm(y.T @ y, ord="fro")
+    return float(numerator / denominator)
 
-    def test_extracts_named_layers(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=["linear1", "linear2"])
-        with extractor:
-            model(torch.randn(4, 16))
-        acts = extractor.get_activations()
-        assert "linear1" in acts
-        assert "linear2" in acts
-        assert acts["linear1"].shape == (4, 32)
-        assert acts["linear2"].shape == (4, 8)
 
-    def test_context_manager_removes_hooks(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=["linear1"])
-        with extractor:
-            pass
-        assert len(extractor._hooks) == 0
+def test_cka_matches_independent_numpy_reference():
+    generator = torch.Generator().manual_seed(7)
+    first = torch.randn(31, 5, generator=generator)
+    second = torch.randn(31, 9, generator=generator)
+    expected = _numpy_linear_cka(first.numpy(), second.numpy())
+    assert cka_similarity(first, second) == pytest.approx(expected, abs=1e-6)
 
-    def test_multiple_forward_passes_concatenated(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=["linear1"])
-        with extractor:
-            model(torch.randn(3, 16))
-            model(torch.randn(5, 16))
-        acts = extractor.get_activations()
-        assert acts["linear1"].shape == (8, 32)
 
-    def test_no_layers_requested(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=[])
-        with extractor:
-            model(torch.randn(4, 16))
-        assert extractor.get_activations() == {}
+def test_cka_identical_scaling_and_orthogonal_feature_invariance():
+    generator = torch.Generator().manual_seed(8)
+    values = torch.randn(60, 12, generator=generator)
+    orthogonal, _ = torch.linalg.qr(torch.randn(12, 12, generator=generator))
+    assert cka_similarity(values, values) == pytest.approx(1.0, abs=1e-5)
+    assert cka_similarity(values, values * 13.0) == pytest.approx(1.0, abs=1e-5)
+    assert cka_similarity(values, values @ orthogonal) == pytest.approx(1.0, abs=1e-5)
 
-    def test_nonexistent_layer_ignored(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=["nonexistent"])
-        with extractor:
-            model(torch.randn(4, 16))
-        assert extractor.get_activations() == {}
 
-    def test_clear(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=["linear1"])
-        with extractor:
-            model(torch.randn(4, 16))
-        assert len(extractor._activations["linear1"]) > 0
-        extractor.clear()
-        assert len(extractor._activations["linear1"]) == 0
+def test_cka_supports_different_feature_dimensions_and_random_is_lower():
+    generator = torch.Generator().manual_seed(9)
+    latent = torch.randn(100, 4, generator=generator)
+    first = latent @ torch.randn(4, 7, generator=generator)
+    second = latent @ torch.randn(4, 11, generator=generator)
+    unrelated = torch.randn(100, 11, generator=generator)
+    assert cka_similarity(first, second) > cka_similarity(first, unrelated)
 
-    def test_3d_output_mean_pooled(self):
-        class FakeSeqModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.embed = nn.Embedding(10, 16)
-                self.proj = nn.Linear(16, 8)
 
-            def forward(self, x):
-                return self.proj(self.embed(x))
+def test_cka_rejects_sample_mismatch():
+    with pytest.raises(ValueError, match="Sample count mismatch"):
+        cka_similarity(torch.randn(4, 3), torch.randn(5, 9))
 
-        model = FakeSeqModel()
-        extractor = ActivationExtractor(model, layer_names=["embed"])
-        with extractor:
-            model(torch.randint(0, 10, (2, 5)))
-        acts = extractor.get_activations()
-        assert acts["embed"].shape == (2, 16)
 
-    def test_tuple_output_handled(self):
-        class TupleModule(nn.Module):
-            def forward(self, x):
-                return (x * 2, x * 3)
+def test_cka_comparison_records_alignment_provenance():
+    first = _set({"layer.0": torch.randn(20, 4), "layer.2": torch.randn(20, 5)})
+    second = _set({"layer.0": torch.randn(20, 8), "layer.1": torch.randn(20, 5)})
+    result = compare_activations_cka(first, second)
+    assert result.aligned_layers == ("layer.0",)
+    assert result.calibration_id == "calibration"
+    assert result.sample_count == 20
 
-        class TupleModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.block = TupleModule()
 
-            def forward(self, x):
-                out, _ = self.block(x)
-                return out
+def test_cka_comparison_rejects_different_calibration_text_identity():
+    first = _set({"layer.0": torch.randn(20, 4)}, "first")
+    second = _set({"layer.0": torch.randn(20, 4)}, "second")
+    with pytest.raises(ValueError, match="Calibration identity mismatch"):
+        compare_activations_cka(first, second)
 
-        model = TupleModel()
-        extractor = ActivationExtractor(model, layer_names=["block"])
-        with extractor:
-            model(torch.randn(4, 8))
-        acts = extractor.get_activations()
-        assert acts["block"].shape == (4, 8)
 
-    def test_activations_detached_and_cpu(self):
-        model = self._make_model()
-        extractor = ActivationExtractor(model, layer_names=["linear1"])
-        with extractor:
-            model(torch.randn(4, 16))
-        acts = extractor.get_activations()
-        assert not acts["linear1"].requires_grad
-        assert acts["linear1"].device == torch.device("cpu")
+class SequenceModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = nn.Embedding(10, 3)
+
+    def forward(self, values):
+        return self.embed(values)
+
+
+def test_activation_extraction_is_padding_aware():
+    model = SequenceModel()
+    with torch.no_grad():
+        model.embed.weight.copy_(torch.arange(30, dtype=torch.float32).reshape(10, 3))
+    tokens = torch.tensor([[1, 2, 9], [3, 9, 9]])
+    mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+    extractor = ActivationExtractor(model, ["embed"])
+    extractor.set_attention_mask(mask)
+    with extractor:
+        model(tokens)
+    expected = torch.stack([model.embed.weight[[1, 2]].mean(dim=0), model.embed.weight[3]])
+    assert torch.allclose(extractor.get_activations()["embed"], expected)
+
+
+def test_sequence_pooling_requires_an_attention_mask():
+    model = SequenceModel()
+    extractor = ActivationExtractor(model, ["embed"])
+    with extractor, pytest.raises(ValueError, match="attention mask"):
+        model(torch.tensor([[1, 2]]))
+
+
+def test_activation_hooks_are_removed_and_outputs_are_detached():
+    model = nn.Sequential(nn.Linear(3, 4), nn.ReLU())
+    extractor = ActivationExtractor(model, ["0"])
+    with extractor:
+        model(torch.randn(2, 3))
+    output = extractor.get_activations()["0"]
+    assert not output.requires_grad
+    assert output.device.type == "cpu"
+    assert extractor._hooks == []

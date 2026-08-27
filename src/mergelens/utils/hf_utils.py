@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
@@ -127,11 +128,14 @@ def check_architecture_compatibility(models: list[str]) -> tuple[bool, str]:
     architectures = {m.architecture for m in metas if m.architecture}
 
     if len(architectures) <= 1:
-        return True, "Models have compatible architectures."
-    return False, f"Architecture mismatch: {architectures}. Models may not be mergeable."
+        return True, "Models report the same architecture identifier where metadata is present."
+    return False, (
+        f"Architecture identifiers differ: {architectures}. Inspect exact tensor coverage; "
+        "no numerical comparison should be inferred from this metadata check alone."
+    )
 
 
-def _estimate_params_from_config(config: dict) -> int | None:
+def _estimate_params_from_config(config: dict[str, Any]) -> int | None:
     """Rough parameter estimate from config.json fields."""
     h = config.get("hidden_size")
     n_layers = config.get("num_hidden_layers")
@@ -140,5 +144,5 @@ def _estimate_params_from_config(config: dict) -> int | None:
     if h and n_layers and v:
         # Very rough: embeddings + n_layers * (4*h*h + 2*h*inter) + lm_head
         inter = inter or 4 * h
-        return v * h + n_layers * (4 * h * h + 2 * h * inter) + v * h
+        return int(v * h + n_layers * (4 * h * h + 2 * h * inter) + v * h)
     return None

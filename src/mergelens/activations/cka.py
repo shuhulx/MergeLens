@@ -1,64 +1,73 @@
-"""Centered Kernel Alignment between model activations.
-
-Compares functional similarity that weight-level metrics miss —
-two layers can have different weights but similar behavior.
-"""
+"""Linear CKA over explicitly aligned calibration activations."""
 
 from __future__ import annotations
 
-import logging
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 
-import torch
-
+from mergelens.activations.extractor import ActivationSet
 from mergelens.compare.metrics import cka_similarity
 
-logger = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class CKAComparison(Mapping[str, float]):
+    """CKA scores with calibration and layer-alignment provenance."""
+
+    scores: dict[str, float]
+    calibration_id: str
+    sample_count: int
+    aligned_layers: tuple[str, ...]
+    pooling_rule: str
+
+    def __getitem__(self, key: str) -> float:
+        return self.scores[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.scores)
+
+    def __len__(self) -> int:
+        return len(self.scores)
 
 
 def compare_activations_cka(
-    activations_a: dict[str, torch.Tensor],
-    activations_b: dict[str, torch.Tensor],
-) -> dict[str, float]:
-    """Compute CKA similarity for each common layer between two models.
+    activations_a: ActivationSet,
+    activations_b: ActivationSet,
+) -> CKAComparison:
+    """Compute CKA for exact-name layers over the same calibration samples.
 
-    Args:
-        activations_a: {layer_name: (n_samples, hidden)} from model A
-        activations_b: {layer_name: (n_samples, hidden)} from model B
-
-    Returns:
-        {layer_name: cka_score} for common layers. Layers with mismatched
-        hidden dimensions are skipped with a warning (different architectures
-        produce incompatible activation spaces for direct CKA comparison).
+    Feature widths may differ. Sample counts and calibration identities may not.
     """
-    common_layers = set(activations_a.keys()) & set(activations_b.keys())
-    results = {}
 
-    for layer in sorted(common_layers):
-        act_a = activations_a[layer]
-        act_b = activations_b[layer]
+    if activations_a.calibration_id != activations_b.calibration_id:
+        raise ValueError(
+            "Calibration identity mismatch; CKA requires activations from the same texts and rule."
+        )
+    if activations_a.sample_count != activations_b.sample_count:
+        raise ValueError(
+            f"Sample count mismatch: {activations_a.sample_count} vs "
+            f"{activations_b.sample_count} samples"
+        )
+    if activations_a.pooling_rule != activations_b.pooling_rule:
+        raise ValueError(
+            f"Pooling rule mismatch: {activations_a.pooling_rule!r} vs "
+            f"{activations_b.pooling_rule!r}"
+        )
 
-        # Ensure same number of samples
-        n = min(act_a.shape[0], act_b.shape[0])
-        act_a = act_a[:n]
-        act_b = act_b[:n]
-
-        # Skip layers where hidden dimensions differ — CKA requires both
-        # activation matrices to span the same sample space, but the hidden
-        # dim can differ only when the underlying kernel matrices are formed
-        # via X @ X^T (shape n x n).  However mismatched hidden dims indicate
-        # architecturally incompatible layers, so we skip rather than silently
-        # produce a meaningless score.
-        if act_a.shape[1] != act_b.shape[1]:
-            logger.warning(
-                "Skipping CKA for layer %s: hidden dim mismatch (%d vs %d). "
-                "Models have different layer widths at this position.",
-                layer,
-                act_a.shape[1],
-                act_b.shape[1],
+    common_layers = sorted(set(activations_a.activations) & set(activations_b.activations))
+    scores: dict[str, float] = {}
+    for layer in common_layers:
+        first = activations_a.activations[layer]
+        second = activations_b.activations[layer]
+        if first.shape[0] != second.shape[0]:
+            raise ValueError(
+                f"Sample count mismatch for {layer}: {first.shape[0]} vs {second.shape[0]}"
             )
-            continue
+        scores[layer] = round(cka_similarity(first, second), 6)
 
-        score = cka_similarity(act_a, act_b)
-        results[layer] = round(score, 4)
-
-    return results
+    return CKAComparison(
+        scores=scores,
+        calibration_id=activations_a.calibration_id,
+        sample_count=activations_a.sample_count,
+        aligned_layers=tuple(common_layers),
+        pooling_rule=activations_a.pooling_rule,
+    )

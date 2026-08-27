@@ -3,8 +3,11 @@
 from mergelens.compare.loader import (
     ModelHandle,
     classify_layer,
+    comparison_coverage,
     find_common_tensors,
     iter_aligned_tensors,
+    tensor_sort_key,
+    transformer_block_index,
 )
 from mergelens.models import LayerType
 
@@ -51,3 +54,39 @@ def test_classify_layer():
     assert classify_layer("model.embed_tokens.weight") == LayerType.EMBEDDING
     assert classify_layer("lm_head.weight") == LayerType.LM_HEAD
     assert classify_layer("some_random_tensor") == LayerType.OTHER
+
+
+def test_tensor_order_has_a_complete_deterministic_tie_breaker():
+    names = [
+        "model.layers.0.self_attn.v_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "lm_head.weight",
+    ]
+    expected = sorted(names, key=tensor_sort_key)
+    assert sorted(reversed(names), key=tensor_sort_key) == expected
+    assert sorted({names[2], names[0], names[3], names[1]}, key=tensor_sort_key) == expected
+
+
+def test_transformer_block_is_distinct_from_tensor_position():
+    assert transformer_block_index("model.layers.17.self_attn.q_proj.weight") == 17
+    assert transformer_block_index("model.embed_tokens.weight") is None
+
+
+def test_missing_tensor_coverage_is_explicit(tmp_models):
+    from pathlib import Path
+
+    from safetensors.torch import load_file, save_file
+
+    first, second = tmp_models
+    second_file = Path(second) / "model.safetensors"
+    tensors = load_file(str(second_file))
+    removed = tensors.pop("lm_head.weight")
+    save_file(tensors, str(second_file))
+    coverage = comparison_coverage(
+        ModelHandle(first), ModelHandle(second), "pair", explicit_shared_base=False
+    )
+    assert removed.numel() > 0
+    assert "lm_head.weight" in coverage.tensors_missing_from_candidate
+    assert coverage.parameter_coverage_reference < 1.0
+    assert coverage.scoring_supported is False

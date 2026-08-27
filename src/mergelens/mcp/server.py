@@ -1,14 +1,13 @@
-"""MergeLens MCP server — 8 tools for AI assistant integration.
+"""MergeLens MCP server for evidence-aware static checkpoint inspection.
 
 Tools:
-    compare_models — Layer-by-layer weight comparison + MCI score
+    compare_models — Tensor comparison, coverage, and heuristic assessment
     diagnose_merge — Analyze a MergeKit config
-    get_conflict_zones — Quick conflict identification
-    suggest_strategy — Recommend merge method with generated YAML
+    get_conflict_zones — Heuristic tensor inspection priorities
+    suggest_strategy — Rule-based MergeKit starting configuration
     generate_report — Create HTML report
     explain_layer — Explain a layer's role in merging
-    get_compatibility_score — Quick MCI score
-    audit_model — Run capability probes (requires mergelens[audit])
+    get_compatibility_score — Unvalidated static-risk heuristic
 """
 
 from __future__ import annotations
@@ -37,10 +36,12 @@ def create_server():
         base_model: str | None = None,
         device: str = "cpu",
         svd_rank: int = 64,
+        metrics: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Compare two or more models layer-by-layer with rich diagnostics.
+        """Compare two or more checkpoints with explicit coverage and availability.
 
-        Returns MCI score, layer metrics, conflict zones, and strategy recommendation.
+        Returns exact tensor coverage, attributable raw metrics, unavailable-signal
+        reasons, and an explicitly unvalidated heuristic summary.
         """
         from mergelens.compare.analyzer import compare_models as _compare
 
@@ -49,6 +50,7 @@ def create_server():
             base_model=base_model,
             device=device,
             svd_rank=svd_rank,
+            metrics=metrics,
             show_progress=False,
         )
         return result.model_dump()
@@ -78,16 +80,18 @@ def create_server():
     @mcp.tool()
     def get_conflict_zones(
         models: list[str],
+        base_model: str | None = None,
         device: str = "cpu",
     ) -> list[dict[str, Any]]:
-        """Quickly identify conflict zones between models.
+        """Return heuristic ordered-tensor inspection priorities.
 
-        Returns a list of layer ranges where models disagree significantly.
+        These regions are not transformer layer ranges or method prescriptions.
         """
         from mergelens.compare.analyzer import compare_models as _compare
 
         result = _compare(
             model_paths=models,
+            base_model=base_model,
             device=device,
             show_progress=False,
             include_strategy=False,
@@ -100,9 +104,9 @@ def create_server():
         base_model: str | None = None,
         device: str = "cpu",
     ) -> dict[str, Any]:
-        """Recommend the best merge method with a ready-to-use MergeKit YAML config.
+        """Return a rule-based MergeKit starting configuration.
 
-        Maps diagnostic profiles to optimal merge strategies.
+        The rule and generated parameters are hypotheses for post-merge testing.
         """
         from mergelens.compare.analyzer import compare_models as _compare
 
@@ -119,12 +123,13 @@ def create_server():
     @mcp.tool()
     def generate_report(
         models: list[str],
+        base_model: str | None = None,
         output_path: str = "mergelens_report.html",
         device: str = "cpu",
     ) -> str:
-        """Generate an interactive HTML diagnostic report.
+        """Generate an offline interactive HTML diagnostic report.
 
-        Creates a self-contained HTML file with Plotly charts.
+        Plotly JavaScript is embedded in the output file.
         """
         from pathlib import Path
 
@@ -145,7 +150,12 @@ def create_server():
                 f"output_path must be within the current working directory. Resolved to: {resolved}"
             )
 
-        result = _compare(model_paths=models, device=device, show_progress=False)
+        result = _compare(
+            model_paths=models,
+            base_model=base_model,
+            device=device,
+            show_progress=False,
+        )
         path = _report(compare_result=result, output_path=output_path)
         return f"Report saved to {path}"
 
@@ -161,17 +171,17 @@ def create_server():
         layer_type = classify_layer(layer_name)
 
         explanations = {
-            LayerType.ATTENTION_Q: "Query projection in self-attention. Controls what the model 'looks for' in context. Conflicts here affect how the model attends to different parts of input.",
-            LayerType.ATTENTION_K: "Key projection in self-attention. Defines what information each token 'advertises'. Critical for maintaining coherent attention patterns.",
-            LayerType.ATTENTION_V: "Value projection in self-attention. Carries the actual information retrieved by attention. Changes here directly affect output quality.",
-            LayerType.ATTENTION_O: "Output projection in self-attention. Mixes attention head outputs. Sensitive to merging — conflicts can break multi-head coordination.",
-            LayerType.MLP_GATE: "Gate projection in MLP. Controls information flow through the FFN. In SwiGLU architectures, this is the gating mechanism.",
-            LayerType.MLP_UP: "Up projection in MLP. Expands hidden dimension. Changes here affect the model's internal knowledge representations.",
-            LayerType.MLP_DOWN: "Down projection in MLP. Compresses back to hidden dim. Often where factual knowledge is stored.",
-            LayerType.NORM: "Layer normalization. Relatively safe to merge — small parameters that mainly affect scale. Low conflict risk.",
-            LayerType.EMBEDDING: "Token embedding layer. Very sensitive — conflicts here affect ALL tokens. Consider using one model's embeddings entirely.",
-            LayerType.LM_HEAD: "Language model head. Maps hidden states to vocabulary. Must match embedding layer for consistency. Usually tied to embeddings.",
-            LayerType.OTHER: "Unrecognized layer type. Check the full layer name for hints about its function.",
+            LayerType.ATTENTION_Q: "Query projection used to form self-attention query vectors.",
+            LayerType.ATTENTION_K: "Key projection used to form self-attention key vectors.",
+            LayerType.ATTENTION_V: "Value projection used to form self-attention value vectors.",
+            LayerType.ATTENTION_O: "Output projection that maps combined attention-head output back to the hidden width.",
+            LayerType.MLP_GATE: "Gate projection used by gated feed-forward blocks such as SwiGLU.",
+            LayerType.MLP_UP: "Feed-forward projection from hidden width to the intermediate width.",
+            LayerType.MLP_DOWN: "Feed-forward projection from intermediate width back to hidden width.",
+            LayerType.NORM: "Normalization scale or bias tensor, depending on the architecture.",
+            LayerType.EMBEDDING: "Token embedding tensor. Shape compatibility is reported separately because vocabulary or hidden-width differences can prevent alignment.",
+            LayerType.LM_HEAD: "Output projection from hidden states to vocabulary logits; it may be tied to token embeddings.",
+            LayerType.OTHER: "Tensor role was not recognized from its name; inspect the checkpoint architecture and full tensor name.",
         }
 
         explanation = explanations.get(layer_type, explanations[LayerType.OTHER])
@@ -180,37 +190,27 @@ def create_server():
     @mcp.tool()
     def get_compatibility_score(
         models: list[str],
+        base_model: str | None = None,
         device: str = "cpu",
     ) -> dict[str, Any]:
-        """Get a quick Merge Compatibility Index (0-100) for two or more models.
+        """Get an unvalidated static-risk heuristic for two or more models.
 
-        The MCI is a composite score indicating how well models will merge.
-        75+: Highly compatible, 55-75: Compatible, 35-55: Risky, <35: Incompatible.
+        The result can be suppressed for unsupported comparisons and never
+        establishes downstream merged-model quality.
         """
         from mergelens.compare.analyzer import compare_models as _compare
 
         result = _compare(
             model_paths=models,
+            base_model=base_model,
             device=device,
             show_progress=False,
             include_strategy=False,
         )
-        return result.mci.model_dump()
-
-    @mcp.tool()
-    def audit_model(
-        base_model: str,
-        merged_model: str,
-        categories: list[str] | None = None,
-        device: str = "cpu",
-    ) -> dict[str, Any]:
-        """Audit a merged model's capabilities against its base.
-
-        Requires mergelens[audit] extra. Runs probes across categories
-        like reasoning, code, chat, math, safety, instruction_following.
-        """
         return {
-            "error": "audit_model is not yet implemented. Capability auditing is planned for a future release of MergeLens."
+            "assessment": result.mci.model_dump(),
+            "coverage": [item.model_dump() for item in result.coverage],
+            "metric_availability": [item.model_dump() for item in result.metric_availability],
         }
 
     return mcp

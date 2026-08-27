@@ -92,6 +92,9 @@ class MetricAvailability(BaseModel):
     reason: str | None = None
     computed_tensor_count: int = Field(default=0, ge=0)
     affected_tensor_count: int = Field(default=0, ge=0)
+    computed_parameter_count: int = Field(default=0, ge=0)
+    affected_parameter_count: int = Field(default=0, ge=0)
+    parameter_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class TensorShapeMismatch(BaseModel):
@@ -100,6 +103,15 @@ class TensorShapeMismatch(BaseModel):
     tensor_name: str
     reference_shape: tuple[int, ...]
     candidate_shape: tuple[int, ...]
+
+
+class TensorDtypeIssue(BaseModel):
+    """A same-name tensor pair unsuitable for floating-point diagnostics."""
+
+    tensor_name: str
+    reference_dtype: str
+    candidate_dtype: str
+    reason: str
 
 
 class ModelInfo(BaseModel):
@@ -116,6 +128,7 @@ class ModelInfo(BaseModel):
     vocab_size: int | None = None
     embedding_shape: tuple[int, ...] | None = None
     lm_head_shape: tuple[int, ...] | None = None
+    resolved_revision: str | None = None
 
 
 class ComparisonCoverage(BaseModel):
@@ -137,6 +150,8 @@ class ComparisonCoverage(BaseModel):
     tensors_missing_from_reference: list[str] = Field(default_factory=list)
     tensors_missing_from_candidate: list[str] = Field(default_factory=list)
     shape_mismatches: list[TensorShapeMismatch] = Field(default_factory=list)
+    dtype_issues: list[TensorDtypeIssue] = Field(default_factory=list)
+    floating_dtype_mismatches: list[TensorDtypeIssue] = Field(default_factory=list)
     reference_architecture: str | None = None
     candidate_architecture: str | None = None
     reference_hidden_size: int | None = None
@@ -206,6 +221,39 @@ class TensorMetrics(BaseModel):
 LayerMetrics = TensorMetrics
 
 
+class CandidateSetTensorMetrics(BaseModel):
+    """Task-vector diagnostics attributable to one base and candidate set."""
+
+    candidate_set_id: str
+    base_model: str
+    candidate_models: list[str]
+    tensor_name: str
+    tensor_position: int = Field(ge=0)
+    transformer_block: int | None = Field(default=None, ge=0)
+    tensor_type: LayerType = LayerType.OTHER
+    shape: tuple[int, ...] = ()
+    parameter_count: int = Field(default=0, ge=0)
+    sign_disagreement_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    tsv_interference: float | None = Field(default=None, ge=0.0, le=1.0)
+    metric_observations: dict[str, MetricObservation] = Field(default_factory=dict)
+
+
+class ActivationMetrics(BaseModel):
+    """CKA evidence attributable to one checkpoint pair and activation layer."""
+
+    comparison_id: str
+    reference_model: str
+    candidate_model: str
+    activation_layer: str
+    cka_similarity: float = Field(ge=0.0, le=1.0)
+    calibration_id: str
+    sample_count: int = Field(ge=2)
+    pooling_rule: str
+    reference_feature_count: int = Field(ge=1)
+    candidate_feature_count: int = Field(ge=1)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class TensorConflictRegion(BaseModel):
     """A contiguous ordered-tensor region prioritized for inspection."""
 
@@ -263,6 +311,7 @@ class MergeCompatibilityIndex(BaseModel):
     evidence_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     available_metrics: list[str] = Field(default_factory=list)
     unavailable_metrics: list[MetricAvailability] = Field(default_factory=list)
+    partial_metrics: list[MetricAvailability] = Field(default_factory=list)
     heuristic_band_lower: float | None = Field(default=None, ge=0.0, le=100.0)
     heuristic_band_upper: float | None = Field(default=None, ge=0.0, le=100.0)
     validation_status: Literal["heuristic_unvalidated"] = "heuristic_unvalidated"
@@ -353,6 +402,8 @@ class CompareResult(BaseModel):
         default_factory=list,
         validation_alias=AliasChoices("tensor_metrics", "layer_metrics"),
     )
+    candidate_set_metrics: list[CandidateSetTensorMetrics] = Field(default_factory=list)
+    activation_metrics: list[ActivationMetrics] = Field(default_factory=list)
     tensor_conflict_regions: list[TensorConflictRegion] = Field(
         default_factory=list,
         validation_alias=AliasChoices("tensor_conflict_regions", "conflict_zones"),

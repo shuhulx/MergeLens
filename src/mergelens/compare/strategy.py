@@ -16,7 +16,9 @@ def recommend_strategy(result: CompareResult) -> StrategyRecommendation:
     rows = result.tensor_metrics
     cosine_values = [row.cosine_similarity for row in rows if row.cosine_similarity is not None]
     sign_values = [
-        row.sign_disagreement_rate for row in rows if row.sign_disagreement_rate is not None
+        row.sign_disagreement_rate
+        for row in result.candidate_set_metrics
+        if row.sign_disagreement_rate is not None
     ]
     energy_values = [row.task_vector_energy for row in rows if row.task_vector_energy is not None]
     spectral_values = [row.spectral_overlap for row in rows if row.spectral_overlap is not None]
@@ -45,25 +47,7 @@ def recommend_strategy(result: CompareResult) -> StrategyRecommendation:
             "no per-tensor MergeKit overrides were inferred from cosine alone."
         )
 
-    if has_explicit_base and average_sign is not None and average_sign > 0.30:
-        method = MergeMethod.TIES
-        strength = 0.55
-        reasoning = (
-            "The explicit shared base makes task vectors interpretable, and the observed sign "
-            "disagreement exceeds the hand-specified 0.30 inspection threshold. TIES is offered "
-            "as a testable starting hypothesis because it includes sign consensus."
-        )
-        config = _generate_yaml(method, result, density=0.5)
-    elif has_explicit_base and average_energy is not None and average_energy > 0.80:
-        method = MergeMethod.DARE_TIES
-        strength = 0.50
-        reasoning = (
-            "The explicit shared base supports task-vector analysis and leading singular values "
-            "contain more than 80% of measured task-vector energy. DARE-TIES is an illustrative "
-            "prune-and-consensus experiment, not an evidence-backed optimum."
-        )
-        config = _generate_yaml(method, result, density=0.5)
-    elif not has_explicit_base and len(result.models) == 2:
+    if not has_explicit_base and len(result.models) == 2:
         method = MergeMethod.SLERP
         strength = 0.40
         reasoning = (

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from mergelens.compare.loader import ModelHandle, find_common_tensors
@@ -42,13 +44,15 @@ def compute_interference(
         if base_handle is not None:
             base_tensor = base_handle.get_tensor(name)
             task_vectors = [compute_task_vector(tensor, base_tensor) for tensor in source_tensors]
-            pairwise = _pairwise_cosines(task_vectors)
-            interference = (1.0 - sum(pairwise) / len(pairwise)) / 2.0
+            interference = _weighted_task_vector_interference(task_vectors, normalized_weights)
         else:
             deviations = [
                 1.0 - cosine_similarity(tensor, weighted_average) for tensor in source_tensors
             ]
-            interference = sum(deviations) / (2.0 * len(deviations))
+            interference = (
+                sum(deviation * weight for deviation, weight in zip(deviations, normalized_weights))
+                / 2.0
+            )
 
         scores.append(
             InterferenceScore(
@@ -65,17 +69,25 @@ def _normalize_weights(weights: list[float] | None, count: int) -> list[float]:
         return [1.0 / count] * count
     if len(weights) != count:
         raise ValueError(f"Expected {count} source weights, received {len(weights)}.")
+    if any(not math.isfinite(weight) or weight < 0 for weight in weights):
+        raise ValueError("Source weights must be finite and non-negative.")
     total = sum(weights)
-    if abs(total) <= 1e-12:
-        raise ValueError("Source weights must not sum to zero.")
+    if total <= 0:
+        raise ValueError("Source weights must contain at least one positive value.")
     return [weight / total for weight in weights]
 
 
-def _pairwise_cosines(task_vectors: list[torch.Tensor]) -> list[float]:
-    values: list[float] = []
+def _weighted_task_vector_interference(
+    task_vectors: list[torch.Tensor], weights: list[float]
+) -> float:
+    weighted_disagreements: list[tuple[float, float]] = []
     for index, first in enumerate(task_vectors):
-        for second in task_vectors[index + 1 :]:
-            values.append(cosine_similarity(first, second))
-    if not values:
-        raise ValueError("At least two task vectors are required.")
-    return values
+        for offset, second in enumerate(task_vectors[index + 1 :], start=index + 1):
+            pair_weight = weights[index] * weights[offset]
+            if pair_weight > 0:
+                disagreement = (1.0 - cosine_similarity(first, second)) / 2.0
+                weighted_disagreements.append((disagreement, pair_weight))
+    total_weight = sum(weight for _, weight in weighted_disagreements)
+    if total_weight == 0.0:
+        return 0.0
+    return sum(value * weight for value, weight in weighted_disagreements) / total_weight

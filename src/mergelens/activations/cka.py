@@ -18,6 +18,8 @@ class CKAComparison(Mapping[str, float]):
     sample_count: int
     aligned_layers: tuple[str, ...]
     pooling_rule: str
+    feature_dimensions: dict[str, tuple[int, int]]
+    warnings: tuple[str, ...] = ()
 
     def __getitem__(self, key: str) -> float:
         return self.scores[key]
@@ -55,14 +57,33 @@ def compare_activations_cka(
 
     common_layers = sorted(set(activations_a.activations) & set(activations_b.activations))
     scores: dict[str, float] = {}
+    feature_dimensions: dict[str, tuple[int, int]] = {}
     for layer in common_layers:
         first = activations_a.activations[layer]
         second = activations_b.activations[layer]
+        if first.shape[0] != activations_a.sample_count:
+            raise ValueError(
+                f"Recorded sample count mismatch for {layer} in the reference activations: "
+                f"{activations_a.sample_count} recorded vs {first.shape[0]} rows"
+            )
+        if second.shape[0] != activations_b.sample_count:
+            raise ValueError(
+                f"Recorded sample count mismatch for {layer} in the candidate activations: "
+                f"{activations_b.sample_count} recorded vs {second.shape[0]} rows"
+            )
         if first.shape[0] != second.shape[0]:
             raise ValueError(
                 f"Sample count mismatch for {layer}: {first.shape[0]} vs {second.shape[0]}"
             )
         scores[layer] = round(cka_similarity(first, second), 6)
+        feature_dimensions[layer] = (first.shape[1], second.shape[1])
+
+    warnings: list[str] = []
+    if any(max(widths) > activations_a.sample_count for widths in feature_dimensions.values()):
+        warnings.append(
+            "Biased linear CKA can be strongly upward-biased when feature width exceeds sample "
+            "count; interpret it only with a matched null baseline."
+        )
 
     return CKAComparison(
         scores=scores,
@@ -70,4 +91,6 @@ def compare_activations_cka(
         sample_count=activations_a.sample_count,
         aligned_layers=tuple(common_layers),
         pooling_rule=activations_a.pooling_rule,
+        feature_dimensions=feature_dimensions,
+        warnings=tuple(warnings),
     )

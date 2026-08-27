@@ -107,7 +107,7 @@ class TestEffectiveRank:
 
     def test_zero_matrix(self):
         m = torch.zeros(8, 8)
-        assert effective_rank(m) == 1.0
+        assert effective_rank(m) == 0.0
 
     def test_1d_input(self):
         v = torch.randn(32)

@@ -53,3 +53,17 @@ def test_empty_tensor_export_has_header_only(tmp_models, tmp_path):
     path = tmp_path / "empty.csv"
     export_csv(result, str(path))
     assert len(path.read_text().splitlines()) == 1
+
+
+def test_csv_neutralizes_formula_cells_and_preserves_metric_status(tmp_models, tmp_path):
+    result = compare_models(list(tmp_models), show_progress=False, metrics=["cosine_similarity"])
+    result.tensor_metrics[0].tensor_name = " =1+1"
+    result.tensor_metrics[0].candidate_model = "@external"
+    path = tmp_path / "safe.csv"
+    export_csv(result, str(path))
+    row = next(csv.DictReader(path.read_text().splitlines()))
+    assert row["tensor_name"].startswith("'")
+    assert row["candidate_model"].startswith("'")
+    assert row["cosine_similarity_status"] == "computed"
+    assert row["l2_distance_status"] == "skipped_by_user"
+    assert row["l2_distance_reason"]

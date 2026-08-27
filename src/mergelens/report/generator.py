@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -49,10 +48,11 @@ def generate_report(
         title=title,
         compare=compare_result,
         diagnose=diagnose_result,
-        charts_json={name: json.dumps(chart) for name, chart in charts.items()},
+        charts=charts,
         plotly_js=get_plotlyjs(),
     )
     destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(rendered, encoding="utf-8")
     return str(destination)
 
@@ -208,15 +208,27 @@ def _build_spectral_chart(result: CompareResult) -> dict[str, Any]:
 
 
 def _build_tensor_metrics_chart(result: CompareResult) -> dict[str, Any]:
-    """Build pair-grouped L2 and sign-disagreement traces."""
+    """Build pair L2 and separately attributed candidate-set task-vector traces."""
+    traces = _metric_traces(result, (("l2_distance", "normalized L2 distance"),))
+    for attribute, label in (
+        ("sign_disagreement_rate", "candidate-set sign disagreement"),
+        ("tsv_interference", "candidate-set TSV interference"),
+    ):
+        values = [getattr(row, attribute) for row in result.candidate_set_metrics]
+        if any(value is not None for value in values):
+            traces.append(
+                {
+                    "type": "scatter",
+                    "mode": "lines+markers",
+                    "x": [row.tensor_position for row in result.candidate_set_metrics],
+                    "y": values,
+                    "text": [row.tensor_name for row in result.candidate_set_metrics],
+                    "name": f"candidate_set_0 - {label}",
+                    "connectgaps": False,
+                }
+            )
     return {
-        "data": _metric_traces(
-            result,
-            (
-                ("l2_distance", "normalized L2 distance"),
-                ("sign_disagreement_rate", "task-vector sign disagreement"),
-            ),
-        ),
+        "data": traces,
         "layout": {
             "title": "Tensor diagnostics by checkpoint pair",
             "xaxis": {"title": "Ordered tensor position"},

@@ -56,6 +56,14 @@ class WeightDivergenceResourceLimitError(ValueError):
     """Raised when the experimental softmax divergence would allocate too much."""
 
 
+class NonFiniteTensorError(ValueError):
+    """Raised when a diagnostic receives NaN or infinite tensor values."""
+
+
+class DegenerateMetricInputError(ValueError):
+    """Raised when a mathematically undefined metric input is encountered."""
+
+
 def register_metric(name: str):
     """Register one underlying diagnostic signal."""
 
@@ -71,6 +79,25 @@ def _require_same_shape(a: torch.Tensor, b: torch.Tensor) -> None:
         raise ValueError(f"Exact tensor shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}")
 
 
+def _require_finite(*tensors: torch.Tensor) -> None:
+    for index, tensor in enumerate(tensors):
+        if not bool(torch.isfinite(tensor).all()):
+            raise NonFiniteTensorError(
+                f"Tensor input {index} contains NaN or infinite values; the metric is unavailable."
+            )
+
+
+def _scaled_float(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """Return a finite float tensor scaled by its maximum absolute value."""
+
+    _require_finite(tensor)
+    values = tensor.reshape(-1).float()
+    maximum = float(values.abs().max()) if values.numel() else 0.0
+    if maximum == 0.0:
+        return values, 0.0
+    return values / maximum, maximum
+
+
 @register_metric("cosine_similarity")
 def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
     """Cosine similarity of exact-shape flattened tensors.
@@ -80,17 +107,18 @@ def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
     """
 
     _require_same_shape(a, b)
-    a_flat = a.reshape(-1).float()
-    b_flat = b.reshape(-1).float()
+    _require_finite(a, b)
+    a_flat, scale_a = _scaled_float(a)
+    b_flat, scale_b = _scaled_float(b)
+    if scale_a == 0.0 and scale_b == 0.0:
+        return 1.0
+    if scale_a == 0.0 or scale_b == 0.0:
+        return 0.0
     norm_a = torch.linalg.vector_norm(a_flat)
     norm_b = torch.linalg.vector_norm(b_flat)
-    a_zero = bool(norm_a <= 1e-10)
-    b_zero = bool(norm_b <= 1e-10)
-    if a_zero and b_zero:
-        return 1.0
-    if a_zero or b_zero:
-        return 0.0
-    result = float(torch.dot(a_flat, b_flat) / (norm_a * norm_b))
+    result = float(torch.dot(a_flat / norm_a, b_flat / norm_b))
+    if not math.isfinite(result):
+        raise NonFiniteTensorError("Cosine computation produced a non-finite value.")
     return max(-1.0, min(1.0, result))
 
 
@@ -99,13 +127,20 @@ def l2_distance(a: torch.Tensor, b: torch.Tensor) -> float:
     """L2 distance normalized by the tensors' average L2 norm."""
 
     _require_same_shape(a, b)
+    _require_finite(a, b)
     a_flat = a.reshape(-1).float()
     b_flat = b.reshape(-1).float()
+    scale = max(float(a_flat.abs().max()), float(b_flat.abs().max()))
+    if scale == 0.0:
+        return 0.0
+    a_flat = a_flat / scale
+    b_flat = b_flat / scale
     distance = float(torch.linalg.vector_norm(a_flat - b_flat))
     average_norm = float((torch.linalg.vector_norm(a_flat) + torch.linalg.vector_norm(b_flat)) / 2)
-    if average_norm <= 1e-10:
-        return 0.0
-    return distance / average_norm
+    result = distance / average_norm
+    if not math.isfinite(result):
+        raise NonFiniteTensorError("L2 computation produced a non-finite value.")
+    return result
 
 
 @register_metric("weight_distribution_divergence")
@@ -118,6 +153,7 @@ def weight_distribution_divergence(a: torch.Tensor, b: torch.Tensor) -> float:
     """
 
     _require_same_shape(a, b)
+    _require_finite(a, b)
     if a.numel() > MAX_ELEMENTS_FOR_WEIGHT_DIVERGENCE:
         raise WeightDivergenceResourceLimitError(
             f"Tensor has {a.numel():,} elements, above the "
@@ -125,6 +161,11 @@ def weight_distribution_divergence(a: torch.Tensor, b: torch.Tensor) -> float:
         )
     a_flat = a.reshape(-1).float()
     b_flat = b.reshape(-1).float()
+    scale = max(float(a_flat.abs().max()), float(b_flat.abs().max()))
+    if scale == 0.0:
+        return 0.0
+    a_flat = a_flat / scale
+    b_flat = b_flat / scale
     temperature = max(
         float(a_flat.std(unbiased=False)),
         float(b_flat.std(unbiased=False)),
@@ -151,6 +192,7 @@ def spectral_subspace_overlap(a: torch.Tensor, b: torch.Tensor, k: int = 64) -> 
     """
 
     _require_same_shape(a, b)
+    _require_finite(a, b)
     matrix_a = flatten_to_2d(a)
     matrix_b = flatten_to_2d(b)
     if min(matrix_a.shape) < 2 or min(matrix_b.shape) < 2:
@@ -158,6 +200,14 @@ def spectral_subspace_overlap(a: torch.Tensor, b: torch.Tensor, k: int = 64) -> 
     u_a, _, _ = bounded_full_svd(matrix_a, k=k)
     u_b, _, _ = bounded_full_svd(matrix_b, k=k)
     retained_rank = min(u_a.shape[1], u_b.shape[1])
+    if retained_rank == 0:
+        raise DegenerateMetricInputError(
+            "Spectral overlap is undefined when either matrix has numerical rank zero."
+        )
+    if retained_rank >= min(u_a.shape[0], u_b.shape[0]):
+        raise DegenerateMetricInputError(
+            "Spectral overlap is uninformative when the retained subspace spans the ambient dimension."
+        )
     distance = grassmann_distance(u_a[:, :retained_rank], u_b[:, :retained_rank])
     return float(1.0 - distance)
 
@@ -167,8 +217,13 @@ def effective_rank_ratio(a: torch.Tensor, b: torch.Tensor) -> float:
     """Ratio of bounded effective ranks for exact-shape matrices."""
 
     _require_same_shape(a, b)
+    _require_finite(a, b)
     rank_a = effective_rank(a)
     rank_b = effective_rank(b)
+    if rank_a == 0.0 and rank_b == 0.0:
+        return 1.0
+    if rank_a == 0.0 or rank_b == 0.0:
+        return 0.0
     return min(rank_a, rank_b) / max(rank_a, rank_b)
 
 
@@ -182,6 +237,7 @@ def sign_disagreement_rate(task_vectors: list[torch.Tensor]) -> float:
 
     if len(task_vectors) < 2:
         raise ValueError("Sign disagreement requires at least two task vectors.")
+    _require_finite(*task_vectors)
     shapes = {tuple(vector.shape) for vector in task_vectors}
     if len(shapes) != 1:
         raise ValueError(f"Task-vector shape mismatch: {sorted(shapes)}")
@@ -203,13 +259,18 @@ def tsv_interference_score(task_vectors: list[torch.Tensor], k: int = 64) -> flo
 
     if len(task_vectors) < 2:
         raise ValueError("TSV interference requires at least two task vectors.")
+    _require_finite(*task_vectors)
     shapes = {tuple(vector.shape) for vector in task_vectors}
     if len(shapes) != 1:
         raise ValueError(f"Task-vector shape mismatch: {sorted(shapes)}")
     right_subspaces = [bounded_full_svd(vector, k=k)[2] for vector in task_vectors]
     retained_rank = min(subspace.shape[0] for subspace in right_subspaces)
     if retained_rank == 0:
-        raise ValueError("No singular directions were retained.")
+        raise DegenerateMetricInputError("No nonzero singular directions were retained.")
+    if retained_rank >= min(subspace.shape[1] for subspace in right_subspaces):
+        raise DegenerateMetricInputError(
+            "TSV overlap is uninformative when the retained subspace spans the ambient dimension."
+        )
     right_subspaces = [subspace[:retained_rank] for subspace in right_subspaces]
     interferences: list[float] = []
     for index, first in enumerate(right_subspaces):
@@ -225,12 +286,15 @@ def tsv_interference_score(task_vectors: list[torch.Tensor], k: int = 64) -> flo
 def centered_task_vector_energy(task_vector: torch.Tensor, k: int = 64) -> float:
     """Fraction of bounded task-vector spectral energy in the leading ``k`` values."""
 
+    _require_finite(task_vector)
     singular_values = bounded_singular_values(task_vector)
-    total_energy = float(torch.sum(singular_values**2))
-    if total_energy <= 1e-10:
+    maximum = float(singular_values.max()) if singular_values.numel() else 0.0
+    if maximum == 0.0:
         return 0.0
+    normalized = singular_values / maximum
+    total_energy = float(torch.sum(normalized**2))
     retained_rank = min(k, len(singular_values))
-    leading_energy = float(torch.sum(singular_values[:retained_rank] ** 2))
+    leading_energy = float(torch.sum(normalized[:retained_rank] ** 2))
     return leading_energy / total_energy
 
 
@@ -250,26 +314,35 @@ def cka_similarity(activations_a: torch.Tensor, activations_b: torch.Tensor) -> 
         )
     if activations_a.shape[0] < 2:
         raise ValueError("CKA requires at least two aligned samples.")
-    x = activations_a.float()
-    y = activations_b.float()
+    _require_finite(activations_a, activations_b)
+    x_scale = float(activations_a.abs().max())
+    y_scale = float(activations_b.abs().max())
+    if x_scale == 0.0 or y_scale == 0.0:
+        raise DegenerateMetricInputError(
+            "CKA is undefined when either activation matrix has no variation."
+        )
+    x = activations_a.float() / x_scale
+    y = activations_b.float() / y_scale
     x = x - x.mean(dim=0, keepdim=True)
     y = y - y.mean(dim=0, keepdim=True)
     numerator = float(torch.linalg.matrix_norm(x.T @ y, ord="fro") ** 2)
     x_norm = float(torch.linalg.matrix_norm(x.T @ x, ord="fro"))
     y_norm = float(torch.linalg.matrix_norm(y.T @ y, ord="fro"))
     denominator = x_norm * y_norm
-    if denominator <= 1e-12:
-        return 0.0
-    return max(0.0, min(1.0, numerator / denominator))
+    if denominator == 0.0:
+        raise DegenerateMetricInputError(
+            "CKA is undefined when either centered activation matrix has no variation."
+        )
+    result = numerator / denominator
+    if not math.isfinite(result):
+        raise NonFiniteTensorError("CKA computation produced a non-finite value.")
+    return max(0.0, min(1.0, result))
 
 
 _HEURISTIC_WEIGHTS: dict[str, float] = {
     "cosine_similarity": 0.40,
     "spectral_overlap": 0.20,
     "effective_rank_ratio": 0.10,
-    "sign_agreement": 0.15,
-    "tsv_compatibility": 0.10,
-    "cka_similarity": 0.05,
 }
 
 
@@ -314,19 +387,18 @@ def compute_heuristic_assessment(
     rank_ratio = _parameter_weighted_mean(rows, "effective_rank_ratio")
     if rank_ratio is not None:
         components["effective_rank_ratio"] = rank_ratio
-    sign_disagreement = _parameter_weighted_mean(rows, "sign_disagreement_rate")
-    if sign_disagreement is not None:
-        components["sign_agreement"] = 1.0 - sign_disagreement
-    tsv = _parameter_weighted_mean(rows, "tsv_interference")
-    if tsv is not None:
-        components["tsv_compatibility"] = 1.0 - tsv
-    cka = _parameter_weighted_mean(rows, "cka_similarity")
-    if cka is not None:
-        components["cka_similarity"] = cka
-
-    component_weights = {
-        name: weight for name, weight in _HEURISTIC_WEIGHTS.items() if name in components
-    }
+    availability_by_metric = {item.metric: item for item in availability}
+    component_weights = {}
+    for name, weight in _HEURISTIC_WEIGHTS.items():
+        if name not in components:
+            continue
+        metric_coverage = availability_by_metric.get(name)
+        coverage_fraction = (
+            metric_coverage.parameter_coverage
+            if metric_coverage and metric_coverage.parameter_coverage is not None
+            else 0.0
+        )
+        component_weights[name] = weight * coverage_fraction
     available_weight = sum(component_weights.values())
     total_weight = sum(_HEURISTIC_WEIGHTS.values())
     if available_weight == 0:
@@ -354,6 +426,11 @@ def compute_heuristic_assessment(
         evidence_coverage=round(evidence_coverage, 3),
         available_metrics=available_names,
         unavailable_metrics=unavailable,
+        partial_metrics=[
+            item
+            for item in availability
+            if item.status == MetricStatus.COMPUTED and (item.parameter_coverage or 0.0) < 1.0
+        ],
         heuristic_band_lower=round(max(0.0, score - margin), 1),
         heuristic_band_upper=round(min(100.0, score + margin), 1),
         components=components,
@@ -361,6 +438,7 @@ def compute_heuristic_assessment(
         notes=[
             "Weights and thresholds are hand-specified and have not been prospectively calibrated.",
             "Available component weights were renormalized over the signals computed in this run.",
+            "Partial metric availability reduces component weight by compared-parameter coverage.",
             "The heuristic band is a sensitivity display, not a statistical confidence interval.",
         ],
     )
@@ -375,9 +453,9 @@ def merge_compatibility_index(
     energy_scores: list[float] | None = None,
     cka_scores: list[float] | None = None,
 ) -> MergeCompatibilityIndex:
-    """Deprecated list-based adapter for the v0.3 heuristic result model."""
+    """Deprecated list-based adapter for the 2.0.0 heuristic result model."""
 
-    del energy_scores
+    del energy_scores, sign_disagreements, tsv_scores, cka_scores
     components: dict[str, float] = {}
     if cosine_sims:
         components["cosine_similarity"] = max(0.0, min(1.0, float(np.mean(cosine_sims))))
@@ -385,12 +463,6 @@ def merge_compatibility_index(
         components["spectral_overlap"] = float(np.mean(spectral_overlaps))
     if rank_ratios:
         components["effective_rank_ratio"] = float(np.mean(rank_ratios))
-    if sign_disagreements:
-        components["sign_agreement"] = 1.0 - float(np.mean(sign_disagreements))
-    if tsv_scores:
-        components["tsv_compatibility"] = 1.0 - float(np.mean(tsv_scores))
-    if cka_scores:
-        components["cka_similarity"] = float(np.mean(cka_scores))
     weights = {name: _HEURISTIC_WEIGHTS[name] for name in components}
     total = sum(weights.values())
     if not total:

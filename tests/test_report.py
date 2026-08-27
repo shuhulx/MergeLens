@@ -77,3 +77,15 @@ def test_report_escapes_user_supplied_title(tmp_models, tmp_path):
     generate_report(compare_result=result, output_path=str(path), title="<script>alert(1)</script>")
     content = path.read_text()
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
+
+
+def test_report_json_escapes_checkpoint_controlled_script_breakout(tmp_models, tmp_path):
+    result = compare_models(list(tmp_models), show_progress=False, metrics=["cosine_similarity"])
+    payload = "</script><script>globalThis.MERGELENS_XSS=1</script>"
+    result.tensor_metrics[0].tensor_name = payload
+    path = tmp_path / "nested" / "safe.html"
+    generate_report(compare_result=result, output_path=str(path))
+    content = path.read_text()
+    assert payload not in content
+    assert "globalThis.MERGELENS_XSS=1" in content
+    assert "\\u003c/script\\u003e" in content

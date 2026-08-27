@@ -1,10 +1,12 @@
-# Migrating from 0.2 to 0.3
+# Migrating from 0.2.x to 2.0.0
 
-Version 0.3 makes evidence boundaries explicit and removes unfinished surface area.
+Version 2.0.0 makes evidence boundaries explicit and removes unfinished surface area. The major-version boundary reflects the breaking result-schema, CLI, configuration, and public API changes below.
 
-| 0.2 concept | 0.3 replacement |
+| 0.2.x concept | 2.0.0 replacement |
 |---|---|
 | `layer_metrics` | `tensor_metrics` with reference, candidate, comparison ID, tensor position, and optional transformer block |
+| group sign/TSV copied into pair rows | `candidate_set_metrics`, attributable to one explicit base and complete candidate set |
+| block-broadcast CKA on tensor rows | `activation_metrics`, attributable to exact activation layers with calibration and feature-width provenance |
 | `conflict_zones` | `tensor_conflict_regions` with exact tensor names and heuristic trigger signals |
 | compatibility verdict | `risk_tier`, which describes static signals only |
 | confidence | `evidence_coverage`, a non-statistical fraction of available heuristic signal weight |
@@ -14,7 +16,7 @@ Version 0.3 makes evidence boundaries explicit and removes unfinished surface ar
 | cache / `--no-cache` | removed; no correctness-preserving cache was implemented |
 | capability-audit command and extra | removed; the subsystem was not implemented |
 
-Deprecated Python constructor aliases remain temporarily for common result fields, but v0.3 serialization uses only the new names. CLI and report output use the new terminology.
+Deprecated Python constructor aliases remain temporarily for common result fields, but 2.0.0 serialization uses only the new names. CLI and report output use the new terminology.
 
 Metric selection now executes only the named signals:
 

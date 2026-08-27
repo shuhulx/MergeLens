@@ -3,7 +3,7 @@
 [![CI](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml/badge.svg)](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mergelens)](https://pypi.org/project/mergelens/)
 [![Python](https://img.shields.io/pypi/pyversions/mergelens)](https://pypi.org/project/mergelens/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/shuhulx/mergelens/blob/main/LICENSE)
 
 MergeLens is an experimental inspection toolkit for homologous LLM checkpoints. It reports exact tensor coverage and weight, spectral, task-vector, and optional activation-similarity signals; highlights tensors worth inspecting; and proposes a rule-based MergeKit starting configuration. It is intended for model-merging researchers and engineers who need inspectable evidence before spending compute on candidate merges.
 
@@ -38,11 +38,12 @@ mergelens compare model_a/ model_b/ --report report.html
 
 The result exposes:
 
-- the reference and candidate identity for every tensor row;
-- total tensors and parameters, missing names, shape mismatches, and exact comparable coverage;
+- the reference and candidate identity for every pair-tensor row;
+- separately attributable `candidate_set_metrics` for sign/TSV and `activation_metrics` for CKA;
+- total tensors and parameters, missing names, shape/dtype issues, and exact comparable coverage;
 - architecture metadata and known structural incompatibilities;
 - a status and reason for every computed, skipped, unavailable, failed, or resource-limited signal;
-- raw parameter-weighted heuristic components and the weights renormalized for that run;
+- raw parameter-weighted heuristic components, with partial availability reducing component weight by parameter coverage;
 - a machine-readable `validation_status: heuristic_unvalidated`;
 - pair-bounded tensor inspection regions; and
 - an illustrative or parser-validated MergeKit starting configuration.
@@ -64,6 +65,12 @@ print(result.mci.validation_status)  # heuristic_unvalidated
 for row in result.tensor_metrics:
     print(row.reference_model, row.candidate_model, row.tensor_name, row.cosine_similarity)
 
+for row in result.candidate_set_metrics:
+    print(row.base_model, row.candidate_models, row.tensor_name, row.sign_disagreement_rate)
+
+for row in result.activation_metrics:
+    print(row.comparison_id, row.activation_layer, row.cka_similarity, row.warnings)
+
 for signal in result.metric_availability:
     print(signal.metric, signal.status.value, signal.reason)
 ```
@@ -79,12 +86,12 @@ The composite heuristic is not counted as a separate diagnostic signal.
 | Weight-distribution divergence | Weight, experimental | Directional softmax transform of flattened weights | No; explicit selection only | No |
 | Spectral overlap | Weight | Leading left-singular-subspace overlap for matrices | Yes, resource bounded | Yes |
 | Effective-rank ratio | Weight | Ratio of entropy-derived effective ranks | Yes, resource bounded | Yes |
-| Sign disagreement | Task vector | Pairwise sign mismatch; zero/nonzero counts as mismatch | Yes when a shared base and at least two candidates exist | Yes |
-| TSV interference | Task vector | Pairwise right-singular-subspace overlap | Yes when a shared base and at least two candidates exist | Yes |
-| Task-vector energy | Task vector | Fraction of spectral energy in retained leading values | Yes with an explicit base | No; strategy signal only |
-| Linear CKA | Activation, optional | Aligned calibration representations with recorded calibration identity | Only when supplied | Yes only when valid |
+| Sign disagreement | Candidate set task vector | Pairwise sign mismatch; zero/nonzero counts as mismatch | Yes when a shared base and at least two candidates exist | No |
+| TSV interference | Candidate set task vector | Pairwise numerical-rank right-subspace overlap | Yes when a shared base and at least two candidates exist | No |
+| Task-vector energy | Pair tensor task vector | Fraction of spectral energy in retained leading values | Yes with an explicit base | No |
+| Linear CKA | Activation layer, optional | Exact activation-layer observations with calibration and feature-width provenance | Only when supplied | No |
 
-All SVD-backed signals use a conservative full-decomposition resource policy. A metric skipped by that policy is reported as `resource_limit_skipped`; it is not silently converted into a plausible number.
+All SVD-backed signals use a conservative full-decomposition resource policy and retain only numerical-rank directions. Full-ambient subspaces are reported as uninformative. A metric skipped by the resource policy is reported as `resource_limit_skipped`; it is not silently converted into a plausible number.
 
 ## MergeKit configuration diagnosis
 
@@ -92,7 +99,7 @@ All SVD-backed signals use a conservative full-decomposition resource policy. A 
 mergelens diagnose merge.yaml --json diagnosis.json
 ```
 
-Diagnosis honours checkpoint references, an explicit task-vector base, and scalar full-model weights. It discloses ignored or unsupported semantics such as slice assembly, gradients, tokenizer remapping, chat templates, and method-specific merge execution. Unknown merge methods fail closed instead of becoming `linear`.
+Diagnosis honours checkpoint references, an explicit task-vector base, and finite non-negative scalar weights only for top-level full-model inputs. It discloses ignored or unsupported semantics such as slice assembly, gradients, tokenizer remapping, chat templates, and method-specific merge execution. Unknown merge methods fail closed instead of becoming `linear`.
 
 Generated configurations follow current MergeKit model/parameter placement. They are marked `schema_validated` only when the installed MergeKit parser accepted them; otherwise they are marked `illustrative`.
 
@@ -117,7 +124,7 @@ The MCP server exposes seven tools: `compare_models`, `diagnose_merge`, `get_con
 
 Safetensors are memory-mapped and aligned tensor groups are consumed lazily. No exact peak-memory multiplier is claimed: runtime memory also includes float32 conversions, task vectors, bounded SVD workspaces, activation tensors, result rows, report data, and framework overhead.
 
-See [LIMITATIONS.md](LIMITATIONS.md), [VALIDATION.md](VALIDATION.md), [MIGRATION.md](MIGRATION.md), and [CHANGELOG.md](CHANGELOG.md) before interpreting results.
+See [limitations](https://github.com/shuhulx/mergelens/blob/main/LIMITATIONS.md), [validation status](https://github.com/shuhulx/mergelens/blob/main/VALIDATION.md), [migration guidance](https://github.com/shuhulx/mergelens/blob/main/MIGRATION.md), and the [changelog](https://github.com/shuhulx/mergelens/blob/main/CHANGELOG.md) before interpreting results.
 
 ## Development
 
@@ -141,4 +148,4 @@ Supported Python versions are 3.10, 3.11, and 3.12.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See the [license](https://github.com/shuhulx/mergelens/blob/main/LICENSE).

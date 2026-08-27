@@ -32,6 +32,22 @@ def test_scalar_model_weights_affect_no_base_proxy(tmp_models):
     assert [item.score for item in equal] != [item.score for item in skewed]
 
 
+def test_scalar_model_weights_affect_explicit_base_proxy(tmp_path):
+    paths = []
+    for index, seed in enumerate([31, 32, 33]):
+        path = tmp_path / str(index)
+        path.mkdir()
+        _create_tiny_model(path, seed=seed, hidden=8, layers=1)
+        paths.append(str(path))
+    sources = [ModelHandle(paths[1]), ModelHandle(paths[2])]
+    equal = compute_interference(sources, base_handle=ModelHandle(paths[0]), weights=[0.5, 0.5])
+    one_active = compute_interference(
+        sources, base_handle=ModelHandle(paths[0]), weights=[1.0, 0.0]
+    )
+    assert any(item.score > 0 for item in equal)
+    assert all(item.score == 0 for item in one_active)
+
+
 def test_source_similarity_profile_is_raw_not_normalized(tmp_models):
     first, second = [ModelHandle(path) for path in tmp_models]
     profiles = compute_source_similarity_profile(first, [first, second])
@@ -61,6 +77,6 @@ def test_zero_sum_weights_are_rejected(tmp_models):
     try:
         compute_interference(sources, weights=[1.0, -1.0])
     except ValueError as exc:
-        assert "sum to zero" in str(exc)
+        assert "non-negative" in str(exc)
     else:
         raise AssertionError("zero-sum source weights were accepted")

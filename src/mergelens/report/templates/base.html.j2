@@ -45,9 +45,19 @@
   <section class="card">
     <h2>Metric availability ({{ compare.mci.available_metrics|length }}/{{ compare.metadata.total_diagnostic_signals }})</h2>
     <table><thead><tr><th>Signal</th><th>Status</th><th>Computed rows</th><th>Reason</th></tr></thead><tbody>
-    {% for a in compare.metric_availability %}<tr><td><code>{{ a.metric }}</code></td><td>{{ a.status.value }}</td><td>{{ a.computed_tensor_count }}/{{ a.affected_tensor_count }}</td><td>{{ a.reason or "" }}</td></tr>{% endfor %}
+    {% for a in compare.metric_availability %}<tr><td><code>{{ a.metric }}</code></td><td>{{ a.status.value }}</td><td>{{ a.computed_tensor_count }}/{{ a.affected_tensor_count }} ({{ "%.1f%%"|format(a.parameter_coverage * 100) if a.parameter_coverage is not none else "n/a" }} params)</td><td>{{ a.reason or "" }}</td></tr>{% endfor %}
     </tbody></table>
   </section>
+  {% if compare.candidate_set_metrics %}<section class="card"><h2>Candidate-set task-vector measurements</h2>
+  <p class="muted">These values describe the explicit base and the complete candidate set; they are not pair metrics and do not enter pair assessments.</p>
+  <div class="scroll"><table><thead><tr><th>Base</th><th>Candidates</th><th>Position</th><th>Tensor</th><th>Sign disagreement</th><th>TSV</th></tr></thead><tbody>
+  {% for m in compare.candidate_set_metrics %}<tr><td><code>{{ m.base_model }}</code></td><td>{{ m.candidate_models|join(", ") }}</td><td>{{ m.tensor_position }}</td><td><code>{{ m.tensor_name }}</code></td><td>{{ "%.4f"|format(m.sign_disagreement_rate) if m.sign_disagreement_rate is not none else "-" }}</td><td>{{ "%.4f"|format(m.tsv_interference) if m.tsv_interference is not none else "-" }}</td></tr>{% endfor %}
+  </tbody></table></div></section>{% endif %}
+  {% if compare.activation_metrics %}<section class="card"><h2>Activation-layer CKA measurements</h2>
+  <p class="muted">CKA remains activation-layer evidence and is not broadcast to weight tensors or included in the aggregate. High-dimensional estimates require a matched null baseline.</p>
+  <div class="scroll"><table><thead><tr><th>Pair</th><th>Activation layer</th><th>CKA</th><th>Samples</th><th>Feature widths</th><th>Warnings</th></tr></thead><tbody>
+  {% for m in compare.activation_metrics %}<tr><td>{{ m.comparison_id }}</td><td><code>{{ m.activation_layer }}</code></td><td>{{ "%.4f"|format(m.cka_similarity) }}</td><td>{{ m.sample_count }}</td><td>{{ m.reference_feature_count }} / {{ m.candidate_feature_count }}</td><td>{{ m.warnings|join(" ") }}</td></tr>{% endfor %}
+  </tbody></table></div></section>{% endif %}
   <section class="card"><div id="heatmap-chart"></div></section>
   <section class="card"><div id="spectral-chart"></div></section>
   <section class="card"><div id="tensor_metrics-chart"></div></section>
@@ -70,8 +80,8 @@
 {% if diagnose %}<section class="card"><h2>Configuration diagnosis scope</h2><p>Status: {{ diagnose.analysis_status }}</p><p>Honoured: {{ diagnose.honored_features|join(", ") or "none" }}</p><p>Ignored: {{ diagnose.ignored_features|join(", ") or "none" }}</p><p>Unsupported: {{ diagnose.unsupported_features|join(", ") or "none" }}</p></section>{% endif %}
 </main>
 <script>
-{% for chart_id, chart_data in charts_json.items() %}
-try { const spec_{{ chart_id }}={{ chart_data|safe }}; Plotly.newPlot("{{ chart_id }}-{{ 'gauge' if chart_id == 'heuristic' else 'chart' }}",spec_{{ chart_id }}.data,spec_{{ chart_id }}.layout,{responsive:true}); } catch(error) { console.warn("Chart {{ chart_id }} skipped", error); }
+{% for chart_id, chart_data in charts.items() %}
+try { const spec_{{ chart_id }}={{ chart_data|tojson }}; Plotly.newPlot("{{ chart_id }}-{{ 'gauge' if chart_id == 'heuristic' else 'chart' }}",spec_{{ chart_id }}.data,spec_{{ chart_id }}.layout,{responsive:true}); } catch(error) { console.warn("Chart {{ chart_id }} skipped", error); }
 {% endfor %}
 </script>
 </body>

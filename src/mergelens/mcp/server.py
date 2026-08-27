@@ -10,8 +10,6 @@ Tools:
     get_compatibility_score — Unvalidated static-risk heuristic
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 

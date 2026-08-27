@@ -65,7 +65,9 @@ jobs:
         run: |
           python -m venv /tmp/mergelens-wheel
           wheel_path=$(find dist -name '*.whl' -print -quit)
-          /tmp/mergelens-wheel/bin/python -m pip install "${wheel_path}[report]" 'mergekit==0.1.4' pytest
+          /tmp/mergelens-wheel/bin/python -m pip install "${wheel_path}[report,mcp]" 'mergekit==0.1.4' pytest
+          /tmp/mergelens-wheel/bin/python -m pip check
+          /tmp/mergelens-wheel/bin/python -c 'from mergelens.mcp.server import create_server; create_server()'
           /tmp/mergelens-wheel/bin/mergelens --version
           /tmp/mergelens-wheel/bin/mergelens --help
           /tmp/mergelens-wheel/bin/mergelens compare --help

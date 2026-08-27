@@ -7,6 +7,7 @@ from mergelens.compare.metrics import (
     DEFAULT_METRICS,
     DIAGNOSTIC_METRIC_NAMES,
     METRIC_REGISTRY,
+    DegenerateMetricInputError,
     centered_task_vector_energy,
     cosine_similarity,
     effective_rank_ratio,
@@ -42,6 +43,27 @@ def test_l2_and_cosine_known_answers():
     assert l2_distance(values, values) == 0.0
 
 
+def test_tiny_nonzero_inputs_preserve_scale_invariant_semantics():
+    values = torch.tensor([1e-11, -1e-11])
+    assert cosine_similarity(values, -values) == pytest.approx(-1.0)
+    assert l2_distance(values, -values) == pytest.approx(2.0)
+    matrix = torch.diag(torch.tensor([3e-10, 1e-10]))
+    assert effective_rank_ratio(matrix, matrix * 2) == pytest.approx(1.0)
+    assert centered_task_vector_energy(matrix, k=1) == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_inputs_fail_closed(bad):
+    first = torch.tensor([bad, 1.0])
+    second = torch.ones(2)
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        cosine_similarity(first, second)
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        l2_distance(first, second)
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        weight_distribution_divergence(first, second)
+
+
 def test_directional_weight_divergence_is_experimental_and_not_default():
     first = torch.tensor([1.0, 2.0, 3.0])
     second = torch.tensor([3.0, 2.0, 1.0])
@@ -56,6 +78,8 @@ def test_spectral_overlap_rejects_vectors_and_handles_matrices():
     matrix = torch.randn(8, 8)
     assert spectral_subspace_overlap(matrix, matrix, k=3) == pytest.approx(1.0, abs=1e-4)
     assert effective_rank_ratio(matrix, matrix) == pytest.approx(1.0)
+    assert effective_rank_ratio(torch.zeros(2, 2), torch.eye(2)) == 0.0
+    assert effective_rank_ratio(torch.zeros(2, 2), torch.zeros(2, 2)) == 1.0
 
 
 def test_sign_disagreement_counts_zero_vs_nonzero():
@@ -76,10 +100,24 @@ def test_tsv_uses_actual_retained_rank_when_k_exceeds_rank():
     assert tsv_interference_score([first, second], k=64) == pytest.approx(1.0)
 
 
+def test_subspace_metrics_ignore_null_singular_directions():
+    first = torch.tensor([[1.0, 0.0], [0.0, 0.0]])
+    second = torch.tensor([[0.0, 0.0], [0.0, 1.0]])
+    assert spectral_subspace_overlap(first, second, k=64) == pytest.approx(0.0, abs=1e-6)
+    assert tsv_interference_score([first, second], k=64) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_zero_rank_spectral_input_is_unavailable():
+    with pytest.raises(DegenerateMetricInputError, match="rank zero"):
+        spectral_subspace_overlap(torch.zeros(2, 2), torch.eye(2))
+
+
 def test_tsv_opposite_and_identical_vectors_have_same_subspace():
     first = torch.diag(torch.tensor([2.0, 1.0]))
-    assert tsv_interference_score([first, first], k=2) == pytest.approx(1.0)
-    assert tsv_interference_score([first, -first], k=2) == pytest.approx(1.0)
+    assert tsv_interference_score([first, first], k=1) == pytest.approx(1.0)
+    assert tsv_interference_score([first, -first], k=1) == pytest.approx(1.0)
+    with pytest.raises(DegenerateMetricInputError, match="ambient dimension"):
+        tsv_interference_score([first, first], k=2)
 
 
 def test_task_vector_energy_is_bounded_and_rank_one_is_concentrated():

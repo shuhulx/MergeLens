@@ -69,3 +69,32 @@ parameters:
 def test_models_slices_and_modules_are_mutually_exclusive():
     with pytest.raises(ValueError, match="Exactly one"):
         parse_mergekit_config("merge_method: linear\nmodels: [a, b]\nslices: [{sources: [a, b]}]\n")
+
+
+def test_only_plain_top_level_scalar_weights_are_honored():
+    sliced = parse_mergekit_config(
+        """
+merge_method: linear
+slices:
+  - sources:
+      - model: a
+        parameters: {weight: 0.99}
+      - model: b
+        parameters: {weight: 0.01}
+"""
+    )
+    assert not any("scalar non-negative" in item for item in sliced.honored_features)
+    assert any("source-specific" in item for item in sliced.ignored_features)
+
+    full = parse_mergekit_config(
+        """
+merge_method: linear
+models:
+  - model: a
+    parameters: {weight: 0.75, density: 0.5}
+  - model: b
+    parameters: {weight: 0.25}
+"""
+    )
+    assert "scalar non-negative top-level model weights" in full.honored_features
+    assert "per-model parameters other than scalar weight" in full.ignored_features

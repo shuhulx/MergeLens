@@ -8,15 +8,29 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build
+      - name: Verify, build, and validate release artifacts
         run: |
-          pip install build
+          pip install -e '.[dev,report,mcp]' 'mergekit==0.1.4' twine
+          version=$(python -c 'from mergelens import __version__; print(__version__)')
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          ruff check .
+          ruff format --check .
+          mypy src/mergelens
+          pytest -q
           python -m build
+          twine check dist/*
+          python -m venv /tmp/mergelens-release
+          wheel_path=$(find dist -name '*.whl' -print -quit)
+          /tmp/mergelens-release/bin/python -m pip install "${wheel_path}[report,mcp]"
+          /tmp/mergelens-release/bin/python -m pip check
+          /tmp/mergelens-release/bin/mergelens --version
+          /tmp/mergelens-release/bin/python -c 'from mergelens.mcp.server import create_server; create_server()'
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1

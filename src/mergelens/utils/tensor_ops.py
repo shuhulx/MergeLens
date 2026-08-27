@@ -14,6 +14,8 @@ def flatten_to_2d(tensor: torch.Tensor) -> torch.Tensor:
     For 1D tensors, reshapes to (1, N).
     For 3D+, reshapes to (first_dim, product_of_rest).
     """
+    if tensor.ndim == 0:
+        return tensor.reshape(1, 1)
     if tensor.ndim == 1:
         return tensor.unsqueeze(0)
     if tensor.ndim == 2:
@@ -31,6 +33,8 @@ class SVDResourceLimitError(ValueError):
 
 def _prepare_bounded_svd_input(matrix: torch.Tensor) -> torch.Tensor:
     matrix = flatten_to_2d(matrix).float()
+    if not bool(torch.isfinite(matrix).all()):
+        raise ValueError("SVD input contains NaN or infinite values.")
     if matrix.numel() > MAX_ELEMENTS_FOR_SVD:
         raise SVDResourceLimitError(
             f"Tensor has {matrix.numel():,} elements, above the "
@@ -54,8 +58,15 @@ def bounded_full_svd(
     """
 
     matrix = _prepare_bounded_svd_input(matrix)
-    retained_rank = min(k, min(matrix.shape))
     u, singular_values, vh = torch.linalg.svd(matrix, full_matrices=False)
+    if singular_values.numel() == 0 or float(singular_values[0]) == 0.0:
+        retained_rank = 0
+    else:
+        tolerance = (
+            torch.finfo(singular_values.dtype).eps * max(matrix.shape) * float(singular_values[0])
+        )
+        numerical_rank = int((singular_values > tolerance).sum())
+        retained_rank = min(k, numerical_rank)
     return u[:, :retained_rank], singular_values[:retained_rank], vh[:retained_rank, :]
 
 
@@ -70,8 +81,8 @@ def truncated_svd(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Deprecated v0.2 name for :func:`bounded_full_svd`.
 
-    This function never claimed algorithmic truncation in v0.3: it performs a
-    bounded full decomposition and slices the returned factors.
+    This function performs a bounded full decomposition and slices the returned
+    factors; it is not an algorithmically truncated SVD.
     """
 
     return bounded_full_svd(matrix, k=k)
@@ -83,12 +94,16 @@ def effective_rank(matrix: torch.Tensor) -> float:
     erank = exp(-sum(p_i * log(p_i))) where p_i = s_i / sum(s_j)
 
     Higher effective rank = more distributed information.
-    Returns float >= 1.0.
+    Returns 0.0 for a zero-rank matrix and at least 1.0 otherwise.
     """
     singular_values = bounded_singular_values(matrix)
-    singular_values = singular_values[singular_values > 1e-10]
-    if len(singular_values) == 0:
-        return 1.0
+    if len(singular_values) == 0 or float(singular_values[0]) == 0.0:
+        return 0.0
+    matrix_2d = flatten_to_2d(matrix)
+    tolerance = (
+        torch.finfo(singular_values.dtype).eps * max(matrix_2d.shape) * float(singular_values[0])
+    )
+    singular_values = singular_values[singular_values > tolerance]
     p = singular_values / singular_values.sum()
     entropy = -(p * torch.log(p)).sum().item()
     return float(np.exp(entropy))
@@ -103,9 +118,13 @@ def grassmann_distance(U1: torch.Tensor, U2: torch.Tensor) -> float:
     if U1.shape[1] == 0 or U2.shape[1] == 0:
         return 1.0
     # Compute cosines of principal angles
-    M = U1.T @ U2
+    q1, _ = torch.linalg.qr(U1, mode="reduced")
+    q2, _ = torch.linalg.qr(U2, mode="reduced")
+    M = q1.T @ q2
     sigmas = torch.linalg.svdvals(M)
     sigmas = torch.clamp(sigmas, -1.0, 1.0)
+    tolerance = torch.finfo(sigmas.dtype).eps * max(U1.shape[0], U1.shape[1], U2.shape[1]) * 10
+    sigmas = torch.where(torch.abs(1.0 - sigmas) <= tolerance, torch.ones_like(sigmas), sigmas)
     # Principal angles
     angles = torch.acos(sigmas)
     distance = torch.sqrt((angles**2).sum()).item()

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import torch
 from rich.progress import track
 
+from mergelens.__about__ import __version__
 from mergelens.activations.cka import CKAComparison
 from mergelens.compare.loader import (
     ModelHandle,
@@ -19,6 +20,7 @@ from mergelens.compare.loader import (
 from mergelens.compare.metrics import (
     DEFAULT_METRICS,
     DIAGNOSTIC_METRIC_NAMES,
+    DegenerateMetricInputError,
     WeightDivergenceResourceLimitError,
     centered_task_vector_energy,
     compute_heuristic_assessment,
@@ -32,6 +34,8 @@ from mergelens.compare.metrics import (
 )
 from mergelens.compare.strategy import recommend_strategy
 from mergelens.models import (
+    ActivationMetrics,
+    CandidateSetTensorMetrics,
     CompareResult,
     ComparisonCoverage,
     LayerType,
@@ -105,7 +109,6 @@ def compare_models(
     ]
 
     rows: list[TensorMetrics] = []
-    rows_by_identity: dict[tuple[str, str], TensorMetrics] = {}
     for coverage, candidate in zip(coverages, candidates):
         names = find_common_tensors([reference, candidate])
         iterator: Iterable[tuple[str, LayerType, list[torch.Tensor]]] = iter_aligned_tensors(
@@ -131,18 +134,23 @@ def compare_models(
                 shape=tuple(reference_tensor.shape),
                 parameter_count=reference_tensor.numel(),
             )
-            _compute_pair_metrics(
+            finite_weight_inputs = _compute_pair_metrics(
                 row,
                 reference_tensor,
                 candidate_tensor,
                 requested_metrics=requested_metrics,
                 svd_rank=svd_rank,
                 explicit_shared_base=explicit_shared_base,
-                cka_comparisons=cka_comparisons,
-                candidate_keys=(candidate.path_or_repo, candidate.info.name),
             )
+            if not finite_weight_inputs:
+                coverage.scoring_supported = False
+                condition = (
+                    "Aggregate scoring is suppressed because at least one exact-shape tensor "
+                    "contains NaN or infinite values."
+                )
+                if condition not in coverage.unsupported_conditions:
+                    coverage.unsupported_conditions.append(condition)
             rows.append(row)
-            rows_by_identity[(coverage.comparison_id, name)] = row
 
     if not rows:
         details = "; ".join(
@@ -151,18 +159,48 @@ def compare_models(
         )
         raise ValueError(f"No exact-shape-compatible tensor comparisons are available. {details}")
 
-    _compute_cross_candidate_metrics(
+    candidate_set_metrics = _compute_cross_candidate_metrics(
         reference,
         candidates,
-        coverages,
-        rows_by_identity,
         requested_metrics=requested_metrics,
         svd_rank=svd_rank,
         explicit_shared_base=explicit_shared_base,
         show_progress=show_progress,
     )
+    activation_metrics = _collect_activation_metrics(
+        reference,
+        candidates,
+        coverages,
+        requested_metrics=requested_metrics,
+        cka_comparisons=cka_comparisons,
+    )
 
     availability = _summarize_metric_availability(rows)
+    if candidate_set_metrics:
+        availability = _replace_metric_availability(
+            availability,
+            _summarize_metric_availability(
+                candidate_set_metrics,
+                tuple(
+                    metric
+                    for metric in ("sign_disagreement_rate", "tsv_interference")
+                    if metric in requested_metrics
+                ),
+            ),
+        )
+    if activation_metrics:
+        availability = _replace_metric_availability(
+            availability,
+            [
+                MetricAvailability(
+                    metric="cka_similarity",
+                    status=MetricStatus.COMPUTED,
+                    computed_tensor_count=len(activation_metrics),
+                    affected_tensor_count=len(activation_metrics),
+                    reason="Computed as activation-layer evidence; not broadcast to tensor rows or used in the aggregate.",
+                )
+            ],
+        )
     pair_assessments: dict[str, MergeCompatibilityIndex] = {}
     for coverage in coverages:
         pair_rows = [row for row in rows if row.comparison_id == coverage.comparison_id]
@@ -196,11 +234,14 @@ def compare_models(
         explicit_base=explicit_base_info,
         coverage=coverages,
         tensor_metrics=rows,
+        candidate_set_metrics=candidate_set_metrics,
+        activation_metrics=activation_metrics,
         tensor_conflict_regions=regions,
         mci=mci,
         pair_assessments=pair_assessments,
         metric_availability=availability,
         metadata={
+            "mergelens_version": __version__,
             "device": device,
             "svd_rank": svd_rank,
             "requested_metrics": sorted(requested_metrics),
@@ -213,6 +254,8 @@ def compare_models(
                     "sample_count": comparison.sample_count,
                     "pooling_rule": comparison.pooling_rule,
                     "aligned_layers": list(comparison.aligned_layers),
+                    "feature_dimensions": comparison.feature_dimensions,
+                    "warnings": list(comparison.warnings),
                 }
                 for key, comparison in (cka_comparisons or {}).items()
             },
@@ -241,7 +284,7 @@ def _normalize_metric_selection(metrics: list[str] | None) -> frozenset[str]:
 
 
 def _set_observation(
-    row: TensorMetrics,
+    row: TensorMetrics | CandidateSetTensorMetrics,
     metric: str,
     status: MetricStatus,
     reason: str | None = None,
@@ -257,23 +300,49 @@ def _compute_pair_metrics(
     requested_metrics: frozenset[str],
     svd_rank: int,
     explicit_shared_base: bool,
-    cka_comparisons: dict[str, CKAComparison] | None,
-    candidate_keys: tuple[str, str],
-) -> None:
+) -> bool:
     for metric in DIAGNOSTIC_METRIC_NAMES:
         if metric not in requested_metrics:
             _set_observation(
                 row, metric, MetricStatus.SKIPPED_BY_USER, "Not selected for this run."
             )
+    for metric, reason in (
+        (
+            "sign_disagreement_rate",
+            "Candidate-set task-vector signal requiring an explicit shared base and at least two candidates; see candidate_set_metrics.",
+        ),
+        (
+            "tsv_interference",
+            "Candidate-set task-vector signal requiring an explicit shared base and at least two candidates; see candidate_set_metrics.",
+        ),
+        (
+            "cka_similarity",
+            "Activation-layer signal; no aligned calibration activations are stored on tensor rows; see activation_metrics.",
+        ),
+    ):
+        if metric in requested_metrics:
+            _set_observation(row, metric, MetricStatus.STRUCTURALLY_UNAVAILABLE, reason)
 
-    if "cosine_similarity" in requested_metrics:
+    finite_weight_inputs = bool(
+        torch.isfinite(reference_tensor).all() and torch.isfinite(candidate_tensor).all()
+    )
+    if not finite_weight_inputs:
+        reason = "Reference or candidate tensor contains NaN or infinite values."
+        for metric in requested_metrics - {
+            "cka_similarity",
+            "sign_disagreement_rate",
+            "tsv_interference",
+        }:
+            _set_observation(row, metric, MetricStatus.UNSUPPORTED_INPUT, reason)
+
+    if finite_weight_inputs and "cosine_similarity" in requested_metrics:
         row.cosine_similarity = cosine_similarity(reference_tensor, candidate_tensor)
         _set_observation(row, "cosine_similarity", MetricStatus.COMPUTED)
-    if "l2_distance" in requested_metrics:
+    if finite_weight_inputs and "l2_distance" in requested_metrics:
         row.l2_distance = l2_distance(reference_tensor, candidate_tensor)
         _set_observation(row, "l2_distance", MetricStatus.COMPUTED)
 
-    if "weight_distribution_divergence" in requested_metrics:
+    if finite_weight_inputs and "weight_distribution_divergence" in requested_metrics:
         try:
             row.weight_distribution_divergence = weight_distribution_divergence(
                 reference_tensor, candidate_tensor
@@ -291,7 +360,7 @@ def _compute_pair_metrics(
         ("spectral_overlap", spectral_subspace_overlap, "spectral_overlap"),
         ("effective_rank_ratio", effective_rank_ratio, "effective_rank_ratio"),
     ):
-        if metric not in requested_metrics:
+        if metric not in requested_metrics or not finite_weight_inputs:
             continue
         if min(flatten_to_2d(reference_tensor).shape) < 2:
             _set_observation(
@@ -311,11 +380,13 @@ def _compute_pair_metrics(
             _set_observation(row, metric, MetricStatus.COMPUTED)
         except SVDResourceLimitError as exc:
             _set_observation(row, metric, MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc))
+        except DegenerateMetricInputError as exc:
+            _set_observation(row, metric, MetricStatus.STRUCTURALLY_UNAVAILABLE, str(exc))
         except RuntimeError as exc:
             logger.warning("Numerical failure in %s for %s: %s", metric, row.tensor_name, exc)
             _set_observation(row, metric, MetricStatus.FAILED_NUMERICALLY, str(exc))
 
-    if "task_vector_energy" in requested_metrics:
+    if finite_weight_inputs and "task_vector_energy" in requested_metrics:
         if not explicit_shared_base:
             _set_observation(
                 row,
@@ -332,6 +403,10 @@ def _compute_pair_metrics(
                 _set_observation(
                     row, "task_vector_energy", MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc)
                 )
+            except DegenerateMetricInputError as exc:
+                _set_observation(
+                    row, "task_vector_energy", MetricStatus.STRUCTURALLY_UNAVAILABLE, str(exc)
+                )
             except RuntimeError as exc:
                 logger.warning(
                     "Numerical failure in task_vector_energy for %s: %s", row.tensor_name, exc
@@ -340,115 +415,122 @@ def _compute_pair_metrics(
                     row, "task_vector_energy", MetricStatus.FAILED_NUMERICALLY, str(exc)
                 )
 
-    if "cka_similarity" in requested_metrics:
-        comparison = None
-        if cka_comparisons:
-            for key in candidate_keys:
-                if key in cka_comparisons:
-                    comparison = cka_comparisons[key]
-                    break
-        if comparison is None:
-            _set_observation(
-                row,
-                "cka_similarity",
-                MetricStatus.STRUCTURALLY_UNAVAILABLE,
-                "No aligned calibration activations were supplied for this candidate.",
-            )
-        else:
-            matching_layers = (
-                [row.tensor_name]
-                if row.tensor_name in comparison
-                else [
-                    layer
-                    for layer in comparison.aligned_layers
-                    if (
-                        row.transformer_block is not None
-                        and transformer_block_index(layer) == row.transformer_block
-                    )
-                ]
-            )
-            if len(matching_layers) != 1:
-                _set_observation(
-                    row,
-                    "cka_similarity",
-                    MetricStatus.STRUCTURALLY_UNAVAILABLE,
-                    "CKA layer alignment was absent or ambiguous for this tensor's transformer block.",
-                )
-                return
-            score = float(comparison[matching_layers[0]])
-            if not 0.0 <= score <= 1.0:
-                raise ValueError(
-                    f"CKA score for {matching_layers[0]} must be in [0, 1], got {score}."
-                )
-            row.cka_similarity = score
-            _set_observation(row, "cka_similarity", MetricStatus.COMPUTED)
+    return finite_weight_inputs
 
 
 def _compute_cross_candidate_metrics(
     reference: ModelHandle,
     candidates: list[ModelHandle],
-    coverages: list[ComparisonCoverage],
-    rows_by_identity: dict[tuple[str, str], TensorMetrics],
     *,
     requested_metrics: frozenset[str],
     svd_rank: int,
     explicit_shared_base: bool,
     show_progress: bool,
-) -> None:
+) -> list[CandidateSetTensorMetrics]:
     selected = requested_metrics & {"sign_disagreement_rate", "tsv_interference"}
-    if not selected:
-        return
-    if not explicit_shared_base or len(candidates) < 2:
-        reason = "An explicit shared base and at least two candidate task vectors are required."
-        for row in rows_by_identity.values():
-            for metric in selected:
-                _set_observation(row, metric, MetricStatus.STRUCTURALLY_UNAVAILABLE, reason)
-        return
+    if not selected or not explicit_shared_base or len(candidates) < 2:
+        return []
 
     common_names = find_common_tensors([reference, *candidates])
-    common_name_set = set(common_names)
-    for row in rows_by_identity.values():
-        if row.tensor_name not in common_name_set:
-            for metric in selected:
-                _set_observation(
-                    row,
-                    metric,
-                    MetricStatus.STRUCTURALLY_UNAVAILABLE,
-                    "The tensor is not exact-shape-compatible across the base and all candidates.",
-                )
-
     iterator: Iterable[tuple[str, LayerType, list[torch.Tensor]]] = iter_aligned_tensors(
         [reference, *candidates], common_names
     )
     if show_progress:
         iterator = track(iterator, total=len(common_names), description="Comparing task vectors...")
-    for name, _tensor_type, tensors in iterator:
+    result: list[CandidateSetTensorMetrics] = []
+    for position, (name, tensor_type, tensors) in enumerate(iterator):
         base_tensor, candidate_tensors = tensors[0], tensors[1:]
+        row = CandidateSetTensorMetrics(
+            candidate_set_id="candidate_set_0",
+            base_model=reference.path_or_repo,
+            candidate_models=[candidate.path_or_repo for candidate in candidates],
+            tensor_name=name,
+            tensor_position=position,
+            transformer_block=transformer_block_index(name),
+            tensor_type=tensor_type,
+            shape=tuple(base_tensor.shape),
+            parameter_count=base_tensor.numel(),
+        )
+        if not all(bool(torch.isfinite(tensor).all()) for tensor in tensors):
+            reason = (
+                "A base or candidate tensor required for the cross-candidate signal contains "
+                "NaN or infinite values."
+            )
+            for metric in selected:
+                _set_observation(row, metric, MetricStatus.UNSUPPORTED_INPUT, reason)
+            result.append(row)
+            continue
         task_vectors = [compute_task_vector(tensor, base_tensor) for tensor in candidate_tensors]
-        computed: dict[str, float] = {}
-        failures: dict[str, tuple[MetricStatus, str]] = {}
         if "sign_disagreement_rate" in selected:
-            computed["sign_disagreement_rate"] = sign_disagreement_rate(task_vectors)
+            row.sign_disagreement_rate = sign_disagreement_rate(task_vectors)
+            _set_observation(row, "sign_disagreement_rate", MetricStatus.COMPUTED)
         if "tsv_interference" in selected:
             try:
-                computed["tsv_interference"] = tsv_interference_score(task_vectors, k=svd_rank)
+                row.tsv_interference = tsv_interference_score(task_vectors, k=svd_rank)
+                _set_observation(row, "tsv_interference", MetricStatus.COMPUTED)
             except SVDResourceLimitError as exc:
-                failures["tsv_interference"] = (MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc))
+                _set_observation(
+                    row, "tsv_interference", MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc)
+                )
+            except DegenerateMetricInputError as exc:
+                _set_observation(
+                    row, "tsv_interference", MetricStatus.STRUCTURALLY_UNAVAILABLE, str(exc)
+                )
             except RuntimeError as exc:
                 logger.warning("Numerical failure in TSV interference for %s: %s", name, exc)
-                failures["tsv_interference"] = (MetricStatus.FAILED_NUMERICALLY, str(exc))
-        for coverage in coverages:
-            target_row = rows_by_identity.get((coverage.comparison_id, name))
-            if target_row is None:
-                continue
-            for metric, value in computed.items():
-                setattr(target_row, metric, value)
-                _set_observation(target_row, metric, MetricStatus.COMPUTED)
-            for metric, (status, reason) in failures.items():
-                _set_observation(target_row, metric, status, reason)
+                _set_observation(row, "tsv_interference", MetricStatus.FAILED_NUMERICALLY, str(exc))
+        result.append(row)
+    return result
 
 
-def _summarize_metric_availability(rows: list[TensorMetrics]) -> list[MetricAvailability]:
+def _collect_activation_metrics(
+    reference: ModelHandle,
+    candidates: list[ModelHandle],
+    coverages: list[ComparisonCoverage],
+    *,
+    requested_metrics: frozenset[str],
+    cka_comparisons: dict[str, CKAComparison] | None,
+) -> list[ActivationMetrics]:
+    if "cka_similarity" not in requested_metrics or not cka_comparisons:
+        return []
+    result: list[ActivationMetrics] = []
+    for coverage, candidate in zip(coverages, candidates):
+        comparison = next(
+            (
+                cka_comparisons[key]
+                for key in (candidate.path_or_repo, candidate.info.name)
+                if key in cka_comparisons
+            ),
+            None,
+        )
+        if comparison is None:
+            continue
+        for layer, score in comparison.scores.items():
+            if not 0.0 <= score <= 1.0:
+                raise ValueError(f"CKA score for {layer} must be in [0, 1], got {score}.")
+            widths = comparison.feature_dimensions[layer]
+            result.append(
+                ActivationMetrics(
+                    comparison_id=coverage.comparison_id,
+                    reference_model=reference.path_or_repo,
+                    candidate_model=candidate.path_or_repo,
+                    activation_layer=layer,
+                    cka_similarity=score,
+                    calibration_id=comparison.calibration_id,
+                    sample_count=comparison.sample_count,
+                    pooling_rule=comparison.pooling_rule,
+                    reference_feature_count=widths[0],
+                    candidate_feature_count=widths[1],
+                    warnings=list(comparison.warnings),
+                )
+            )
+    return result
+
+
+def _summarize_metric_availability(
+    rows: Sequence[TensorMetrics | CandidateSetTensorMetrics],
+    metric_names: tuple[str, ...] = DIAGNOSTIC_METRIC_NAMES,
+) -> list[MetricAvailability]:
     summaries: list[MetricAvailability] = []
     priority = (
         MetricStatus.FAILED_NUMERICALLY,
@@ -457,9 +539,18 @@ def _summarize_metric_availability(rows: list[TensorMetrics]) -> list[MetricAvai
         MetricStatus.STRUCTURALLY_UNAVAILABLE,
         MetricStatus.SKIPPED_BY_USER,
     )
-    for metric in DIAGNOSTIC_METRIC_NAMES:
+    for metric in metric_names:
         observations = [row.metric_observations[metric] for row in rows]
         computed = sum(item.status == MetricStatus.COMPUTED for item in observations)
+        affected_parameters = sum(row.parameter_count for row in rows)
+        computed_parameters = sum(
+            row.parameter_count
+            for row, observation in zip(rows, observations)
+            if observation.status == MetricStatus.COMPUTED
+        )
+        parameter_coverage = (
+            computed_parameters / affected_parameters if affected_parameters else None
+        )
         if computed:
             unavailable_count = len(observations) - computed
             reason = (
@@ -475,6 +566,9 @@ def _summarize_metric_availability(rows: list[TensorMetrics]) -> list[MetricAvai
                     reason=reason,
                     computed_tensor_count=computed,
                     affected_tensor_count=len(observations),
+                    computed_parameter_count=computed_parameters,
+                    affected_parameter_count=affected_parameters,
+                    parameter_coverage=parameter_coverage,
                 )
             )
             continue
@@ -490,9 +584,18 @@ def _summarize_metric_availability(rows: list[TensorMetrics]) -> list[MetricAvai
                 status=status,
                 reason="; ".join(reasons) if reasons else None,
                 affected_tensor_count=len(observations),
+                affected_parameter_count=affected_parameters,
+                parameter_coverage=parameter_coverage,
             )
         )
     return summaries
+
+
+def _replace_metric_availability(
+    current: list[MetricAvailability], replacements: list[MetricAvailability]
+) -> list[MetricAvailability]:
+    by_name = {item.metric: item for item in replacements}
+    return [by_name.get(item.metric, item) for item in current]
 
 
 def _conservative_overall_assessment(
@@ -538,6 +641,11 @@ def _conservative_overall_assessment(
     conservative.unavailable_metrics = [
         item for item in availability if item.status != MetricStatus.COMPUTED
     ]
+    conservative.partial_metrics = [
+        item
+        for item in availability
+        if item.status == MetricStatus.COMPUTED and (item.parameter_coverage or 0.0) < 1.0
+    ]
     conservative.notes.append(
         "For multi-candidate runs, the aggregate score is the lowest pair score, not an average."
     )
@@ -547,7 +655,7 @@ def _conservative_overall_assessment(
 def _detect_tensor_conflict_regions(
     rows: list[TensorMetrics],
     cosine_threshold: float = 0.80,
-    minimum_region_size: int = 2,
+    minimum_region_size: int = 1,
 ) -> list[TensorConflictRegion]:
     """Identify ordered tensor ranges triggered by a heuristic cosine threshold."""
 
@@ -570,10 +678,6 @@ def _build_tensor_region(rows: list[TensorMetrics]) -> TensorConflictRegion:
         float(row.cosine_similarity) for row in rows if row.cosine_similarity is not None
     ]
     average_cosine = sum(cosine_values) / len(cosine_values)
-    sign_values = [
-        row.sign_disagreement_rate for row in rows if row.sign_disagreement_rate is not None
-    ]
-    average_sign = sum(sign_values) / len(sign_values) if sign_values else None
     if average_cosine < 0.5:
         severity = Severity.CRITICAL
     elif average_cosine < 0.7:
@@ -583,8 +687,6 @@ def _build_tensor_region(rows: list[TensorMetrics]) -> TensorConflictRegion:
     else:
         severity = Severity.LOW
     triggers = [f"mean cosine similarity {average_cosine:.4f} below heuristic 0.80 threshold"]
-    if average_sign is not None:
-        triggers.append(f"mean sign disagreement {average_sign:.4f}")
     return TensorConflictRegion(
         comparison_id=rows[0].comparison_id,
         reference_model=rows[0].reference_model,
@@ -594,7 +696,7 @@ def _build_tensor_region(rows: list[TensorMetrics]) -> TensorConflictRegion:
         tensor_names=[row.tensor_name for row in rows],
         severity=severity,
         avg_cosine_similarity=round(average_cosine, 4),
-        avg_sign_disagreement=round(average_sign, 4) if average_sign is not None else None,
+        avg_sign_disagreement=None,
         triggering_signals=triggers,
         heuristic_inspection_note=(
             "Inspection priority only. Review these exact tensors and evaluate any merge-method or "

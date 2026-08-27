@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Generator
@@ -18,6 +19,7 @@ from mergelens.models import (
     LayerType,
     ModelInfo,
     ModelRole,
+    TensorDtypeIssue,
     TensorShapeMismatch,
 )
 from mergelens.utils.hf_utils import get_model_metadata, resolve_model_path
@@ -37,6 +39,7 @@ _LAYER_TYPE_PATTERNS = {
     LayerType.EMBEDDING: re.compile(r"embed"),
     LayerType.LM_HEAD: re.compile(r"lm_head"),
 }
+_FLOATING_DTYPES = {"F16", "BF16", "F32", "F64"}
 
 
 def classify_layer(name: str) -> LayerType:
@@ -64,25 +67,47 @@ class ModelHandle:
         self._tensor_to_file: dict[str, Path] = {}
         self._tensor_names: list[str] = []
         self._tensor_shapes: dict[str, tuple[int, ...]] = {}
+        self._tensor_dtypes: dict[str, str] = {}
         self._resolve_files()
 
     def _resolve_files(self) -> None:
         """Resolve safetensors file paths."""
         if self._is_local:
             local_dir = Path(self._resolved_path)
-            self._files = sorted(local_dir.glob("*.safetensors"))
+            index_files = sorted(local_dir.glob("*.safetensors.index.json"))
+            if len(index_files) > 1:
+                raise ValueError(f"Multiple safetensors index files found in {local_dir}.")
+            if index_files:
+                index = json.loads(index_files[0].read_text())
+                weight_map = index.get("weight_map")
+                if not isinstance(weight_map, dict):
+                    raise ValueError(f"Invalid safetensors index: {index_files[0]}")
+                expected = sorted({str(value) for value in weight_map.values()})
+                missing = [name for name in expected if not (local_dir / name).is_file()]
+                if missing:
+                    raise FileNotFoundError(
+                        f"Safetensors index references missing shard(s): {', '.join(missing)}"
+                    )
+                self._files = [local_dir / name for name in expected]
+            else:
+                self._files = sorted(local_dir.glob("*.safetensors"))
         else:
             # Download safetensors files from Hub
             self._files = []
+            failures: list[str] = []
             for fname in self._metadata.safetensors_files or ["model.safetensors"]:
                 try:
-                    local = hf_hub_download(self._resolved_path, fname)
+                    local = hf_hub_download(
+                        self._resolved_path, fname, revision=self._metadata.revision
+                    )
                     self._files.append(Path(local))
                 except Exception as exc:
-                    logger.debug(
-                        "Failed to download %s from %s: %s", fname, self._resolved_path, exc
-                    )
-                    continue
+                    failures.append(f"{fname}: {exc}")
+            if failures:
+                raise FileNotFoundError(
+                    f"Incomplete checkpoint download for {self.path_or_repo}: "
+                    + "; ".join(failures)
+                )
 
         if not self._files:
             raise FileNotFoundError(f"No safetensors files found for {self.path_or_repo}")
@@ -91,8 +116,12 @@ class ModelHandle:
         for fpath in self._files:
             with safe_open(str(fpath), framework="pt", device=self.device) as f:
                 for name in f.keys():
+                    if name in self._tensor_to_file:
+                        raise ValueError(f"Duplicate tensor name across shards: {name}")
                     self._tensor_to_file[name] = fpath
-                    self._tensor_shapes[name] = tuple(f.get_slice(name).get_shape())
+                    tensor_slice = f.get_slice(name)
+                    self._tensor_shapes[name] = tuple(tensor_slice.get_shape())
+                    self._tensor_dtypes[name] = str(tensor_slice.get_dtype())
 
         self._tensor_names = sorted(self._tensor_to_file, key=tensor_sort_key)
 
@@ -106,6 +135,12 @@ class ModelHandle:
         """Tensor shapes read from safetensors headers without loading weights."""
 
         return dict(self._tensor_shapes)
+
+    @property
+    def tensor_dtypes(self) -> dict[str, str]:
+        """Safetensors dtypes read without loading tensor values."""
+
+        return dict(self._tensor_dtypes)
 
     @property
     def exact_parameter_count(self) -> int:
@@ -134,6 +169,7 @@ class ModelHandle:
             vocab_size=config.get("vocab_size"),
             embedding_shape=self._first_shape_for_type(LayerType.EMBEDDING),
             lm_head_shape=self._first_shape_for_type(LayerType.LM_HEAD),
+            resolved_revision=self._metadata.revision,
         )
 
     def _first_shape_for_type(self, tensor_type: LayerType) -> tuple[int, ...] | None:
@@ -155,6 +191,13 @@ class ModelHandle:
         if name not in self._tensor_shapes:
             raise KeyError(f"Tensor '{name}' not found in {self.path_or_repo}")
         return self._tensor_shapes[name]
+
+    def get_tensor_dtype(self, name: str) -> str:
+        """Get a tensor's safetensors dtype without loading its values."""
+
+        if name not in self._tensor_dtypes:
+            raise KeyError(f"Tensor '{name}' not found in {self.path_or_repo}")
+        return self._tensor_dtypes[name]
 
 
 def tensor_sort_key(name: str) -> tuple[tuple[int, ...], str]:
@@ -180,7 +223,10 @@ def find_common_tensors(handles: list[ModelHandle]) -> list[str]:
         common &= set(h.tensor_names)
 
     compatible = {
-        name for name in common if len({handle.get_tensor_shape(name) for handle in handles}) == 1
+        name
+        for name in common
+        if len({handle.get_tensor_shape(name) for handle in handles}) == 1
+        and all(handle.get_tensor_dtype(name) in _FLOATING_DTYPES for handle in handles)
     }
     return sorted(compatible, key=tensor_sort_key)
 
@@ -198,12 +244,35 @@ def comparison_coverage(
     candidate_names = set(candidate.tensor_names)
     common_names = reference_names & candidate_names
     shape_mismatches: list[TensorShapeMismatch] = []
+    dtype_issues: list[TensorDtypeIssue] = []
+    floating_dtype_mismatches: list[TensorDtypeIssue] = []
     compatible_names: list[str] = []
     for name in sorted(common_names, key=tensor_sort_key):
         reference_shape = reference.get_tensor_shape(name)
         candidate_shape = candidate.get_tensor_shape(name)
         if reference_shape == candidate_shape:
-            compatible_names.append(name)
+            reference_dtype = reference.get_tensor_dtype(name)
+            candidate_dtype = candidate.get_tensor_dtype(name)
+            if reference_dtype not in _FLOATING_DTYPES or candidate_dtype not in _FLOATING_DTYPES:
+                dtype_issues.append(
+                    TensorDtypeIssue(
+                        tensor_name=name,
+                        reference_dtype=reference_dtype,
+                        candidate_dtype=candidate_dtype,
+                        reason="Non-floating tensors are excluded from floating-point diagnostics.",
+                    )
+                )
+            else:
+                compatible_names.append(name)
+                if reference_dtype != candidate_dtype:
+                    floating_dtype_mismatches.append(
+                        TensorDtypeIssue(
+                            tensor_name=name,
+                            reference_dtype=reference_dtype,
+                            candidate_dtype=candidate_dtype,
+                            reason="Floating dtypes differ; diagnostics compare float32 values.",
+                        )
+                    )
         else:
             shape_mismatches.append(
                 TensorShapeMismatch(
@@ -256,6 +325,14 @@ def comparison_coverage(
         unsupported_conditions.append(
             f"{len(shape_mismatches)} same-name tensor(s) have different exact shapes."
         )
+    if dtype_issues:
+        unsupported_conditions.append(
+            f"{len(dtype_issues)} same-name tensor(s) use unsupported non-floating dtypes."
+        )
+    if floating_dtype_mismatches:
+        warnings.append(
+            f"{len(floating_dtype_mismatches)} comparable tensor(s) use different floating dtypes; diagnostics cast to float32."
+        )
     if not compatible_names:
         unsupported_conditions.append("No exact-shape-compatible tensor names were found.")
 
@@ -280,7 +357,10 @@ def comparison_coverage(
         for condition in unsupported_conditions
     )
     appears_homologous = (
-        bool(compatible_names) and no_known_structural_conflict and not shape_mismatches
+        bool(compatible_names)
+        and no_known_structural_conflict
+        and not shape_mismatches
+        and not dtype_issues
     )
     scoring_supported = appears_homologous and not missing_reference and not missing_candidate
 
@@ -305,6 +385,8 @@ def comparison_coverage(
         tensors_missing_from_reference=missing_reference,
         tensors_missing_from_candidate=missing_candidate,
         shape_mismatches=shape_mismatches,
+        dtype_issues=dtype_issues,
+        floating_dtype_mismatches=floating_dtype_mismatches,
         reference_architecture=reference_info.architecture,
         candidate_architecture=candidate_info.architecture,
         reference_hidden_size=reference_info.hidden_size,

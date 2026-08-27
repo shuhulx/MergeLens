@@ -5,6 +5,7 @@ import yaml
 
 from mergelens.compare.strategy import _generate_yaml, recommend_strategy, validate_mergekit_yaml
 from mergelens.models import (
+    CandidateSetTensorMetrics,
     CompareResult,
     MergeCompatibilityIndex,
     MergeMethod,
@@ -48,6 +49,21 @@ def _result(*, explicit=False, candidate_count=2, sign=None, energy=None):
         reference_model=reference,
         explicit_base=base,
         tensor_metrics=rows,
+        candidate_set_metrics=(
+            [
+                CandidateSetTensorMetrics(
+                    candidate_set_id="candidate_set_0",
+                    base_model=base.path_or_repo,
+                    candidate_models=[model.path_or_repo for model in candidates],
+                    tensor_name="model.layers.0.self_attn.q_proj.weight",
+                    parameter_count=16,
+                    tensor_position=0,
+                    sign_disagreement_rate=sign,
+                )
+            ]
+            if base is not None and sign is not None
+            else []
+        ),
         mci=MergeCompatibilityIndex(
             score=70,
             risk_tier="mixed_static_signals",
@@ -69,18 +85,18 @@ def test_pair_without_explicit_base_emits_slerp_baseline():
     assert "optimal" not in recommendation.reasoning.lower()
 
 
-def test_high_sign_rule_uses_actual_explicit_base():
+def test_high_sign_signal_does_not_claim_a_method_optimum():
     result = _result(explicit=True, candidate_count=2, sign=0.5, energy=0.2)
     recommendation = recommend_strategy(result)
     config = yaml.safe_load(recommendation.mergekit_yaml)
-    assert recommendation.method == MergeMethod.TIES
+    assert recommendation.method == MergeMethod.TASK_ARITHMETIC
     assert config["base_model"] == "org/actual-base"
     assert {item["model"] for item in config["models"]} == {
         "org/candidate-0",
         "org/candidate-1",
     }
     assert all("weight" in item["parameters"] for item in config["models"])
-    assert all("density" in item["parameters"] for item in config["models"])
+    assert all("density" not in item["parameters"] for item in config["models"])
 
 
 def test_explicit_base_default_is_task_arithmetic_not_list_position():

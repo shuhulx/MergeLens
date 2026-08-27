@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import yaml
@@ -42,10 +43,12 @@ def parse_mergekit_config(yaml_content: str) -> MergeConfig:
     if input_sections[0] == "models":
         _collect_models(raw["models"], models, model_parameters)
         honored.append("top-level full-checkpoint model list")
-        if all(_has_scalar_weight(model_parameters.get(model, {})) for model in models):
-            honored.append("scalar top-level model weights")
+        if all(_has_supported_scalar_weight(model_parameters.get(model, {})) for model in models):
+            honored.append("scalar non-negative top-level model weights")
         elif any("weight" in model_parameters.get(model, {}) for model in models):
-            ignored.append("gradient, filtered, or non-scalar model weights")
+            ignored.append("negative, non-finite, gradient, filtered, or non-scalar model weights")
+        if any(set(model_parameters.get(model, {})) - {"weight"} for model in models):
+            ignored.append("per-model parameters other than scalar weight")
     elif input_sections[0] == "slices":
         for slice_definition in raw["slices"]:
             if not isinstance(slice_definition, dict):
@@ -144,5 +147,11 @@ def _collect_module_models(
                 _collect_models(slice_definition.get("sources", []), models, model_parameters)
 
 
-def _has_scalar_weight(parameters: dict[str, Any]) -> bool:
-    return isinstance(parameters.get("weight", 1.0), (int, float))
+def _has_supported_scalar_weight(parameters: dict[str, Any]) -> bool:
+    value = parameters.get("weight", 1.0)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )

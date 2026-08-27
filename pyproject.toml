@@ -38,7 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 report = ["jinja2>=3.1", "plotly>=5.18"]
-mcp = ["mcp>=1.0"]
+mcp = ["mcp>=1.12.4,<2"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy", "types-PyYAML", "build"]
 all = ["mergelens[report,mcp]"]
 

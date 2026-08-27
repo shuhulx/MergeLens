@@ -98,6 +98,8 @@ def diagnose_config(config_path: str, device: str = "cpu") -> DiagnoseResult:
 
 
 def _scalar_model_weights(config) -> list[float] | None:
+    if "scalar non-negative top-level model weights" not in config.honored_features:
+        return None
     weights: list[float] = []
     for model in config.models:
         if model == config.base_model:

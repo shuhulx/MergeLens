@@ -38,6 +38,16 @@ def test_cka_identical_scaling_and_orthogonal_feature_invariance():
     assert cka_similarity(values, values) == pytest.approx(1.0, abs=1e-5)
     assert cka_similarity(values, values * 13.0) == pytest.approx(1.0, abs=1e-5)
     assert cka_similarity(values, values @ orthogonal) == pytest.approx(1.0, abs=1e-5)
+    assert cka_similarity(values * 1e-8, values * 1e-8) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_cka_rejects_degenerate_or_nonfinite_activations():
+    with pytest.raises(ValueError, match="undefined"):
+        cka_similarity(torch.ones(4, 3), torch.ones(4, 5))
+    bad = torch.randn(4, 3)
+    bad[0, 0] = torch.nan
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        cka_similarity(bad, torch.randn(4, 5))
 
 
 def test_cka_supports_different_feature_dimensions_and_random_is_lower():
@@ -61,6 +71,16 @@ def test_cka_comparison_records_alignment_provenance():
     assert result.aligned_layers == ("layer.0",)
     assert result.calibration_id == "calibration"
     assert result.sample_count == 20
+
+
+def test_cka_validates_recorded_rows_and_warns_when_features_exceed_samples():
+    invalid = ActivationSet({"layer.0": torch.randn(2, 3)}, "calibration", 99)
+    with pytest.raises(ValueError, match="Recorded sample count mismatch"):
+        compare_activations_cka(invalid, invalid)
+    first = ActivationSet({"layer.0": torch.randn(4, 8)}, "calibration", 4)
+    second = ActivationSet({"layer.0": torch.randn(4, 9)}, "calibration", 4)
+    result = compare_activations_cka(first, second)
+    assert result.warnings
 
 
 def test_cka_comparison_rejects_different_calibration_text_identity():

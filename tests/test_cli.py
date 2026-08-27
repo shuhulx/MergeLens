@@ -22,7 +22,18 @@ def test_compare_help():
 def test_compare_basic(tmp_models):
     result = runner.invoke(app, ["compare", tmp_models[0], tmp_models[1]])
     assert result.exit_code == 0
-    assert "Merge Compatibility Index" in result.stdout
+    assert "Unvalidated static-risk heuristic" in result.stdout
+    assert "Exact comparison coverage" in result.stdout
+    assert "Available diagnostic signals" in result.stdout
+
+
+def test_removed_public_options_and_commands_are_absent():
+    help_result = runner.invoke(app, ["--help"])
+    compare_help = runner.invoke(app, ["compare", "--help"])
+    diagnose_help = runner.invoke(app, ["diagnose", "--help"])
+    assert "audit" not in help_result.stdout.lower()
+    assert "--no-cache" not in compare_help.stdout
+    assert "--report" not in diagnose_help.stdout
 
 
 def test_compare_with_json(tmp_models, tmp_path):
@@ -30,4 +41,5 @@ def test_compare_with_json(tmp_models, tmp_path):
     result = runner.invoke(app, ["compare", tmp_models[0], tmp_models[1], "--json", json_path])
     assert result.exit_code == 0
     from pathlib import Path
+
     assert Path(json_path).exists()

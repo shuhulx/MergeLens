@@ -1,62 +1,136 @@
-"""Tests for strategy recommender."""
+"""Tests for transparent strategy rules and current MergeKit schema placement."""
 
-from mergelens.compare.strategy import recommend_strategy
+import pytest
+import yaml
+
+from mergelens.compare.strategy import _generate_yaml, recommend_strategy, validate_mergekit_yaml
 from mergelens.models import (
+    CandidateSetTensorMetrics,
     CompareResult,
-    LayerMetrics,
-    LayerType,
     MergeCompatibilityIndex,
     MergeMethod,
     ModelInfo,
+    ModelRole,
+    TensorMetrics,
 )
 
 
-def _make_result(avg_cos=0.95, sign_disagree=0.1, energy=0.5, spectral=0.8, rank=0.9, mci_score=80):
-    metrics = [
-        LayerMetrics(
-            layer_name=f"layer.{i}", layer_type=LayerType.OTHER,
-            cosine_similarity=avg_cos, l2_distance=0.1,
-            spectral_overlap=spectral, effective_rank_ratio=rank,
-            sign_disagreement_rate=sign_disagree, task_vector_energy=energy,
-        )
-        for i in range(10)
+def _result(*, explicit=False, candidate_count=2, sign=None, energy=None):
+    candidates = [
+        ModelInfo(name=f"candidate_{index}", path_or_repo=f"org/candidate-{index}")
+        for index in range(candidate_count)
     ]
-    mci = MergeCompatibilityIndex(
-        score=mci_score, confidence=0.8, ci_lower=mci_score-10, ci_upper=mci_score+10,
-        verdict="compatible",
+    base = (
+        ModelInfo(
+            name="base",
+            path_or_repo="org/actual-base",
+            role=ModelRole.EXPLICIT_SHARED_BASE,
+        )
+        if explicit
+        else None
     )
+    reference = base or candidates[0].model_copy(update={"role": ModelRole.IMPLICIT_REFERENCE})
+    rows = [
+        TensorMetrics(
+            reference_model=reference.path_or_repo,
+            candidate_model=model.path_or_repo,
+            comparison_id=f"comparison_{index}",
+            tensor_name="model.layers.0.self_attn.q_proj.weight",
+            parameter_count=16,
+            cosine_similarity=0.8,
+            l2_distance=0.2,
+            sign_disagreement_rate=sign,
+            task_vector_energy=energy,
+        )
+        for index, model in enumerate(candidates if explicit else candidates[1:])
+    ]
     return CompareResult(
-        models=[ModelInfo(name="a", path_or_repo="a"), ModelInfo(name="b", path_or_repo="b")],
-        layer_metrics=metrics, conflict_zones=[], mci=mci,
+        models=candidates,
+        reference_model=reference,
+        explicit_base=base,
+        tensor_metrics=rows,
+        candidate_set_metrics=(
+            [
+                CandidateSetTensorMetrics(
+                    candidate_set_id="candidate_set_0",
+                    base_model=base.path_or_repo,
+                    candidate_models=[model.path_or_repo for model in candidates],
+                    tensor_name="model.layers.0.self_attn.q_proj.weight",
+                    parameter_count=16,
+                    tensor_position=0,
+                    sign_disagreement_rate=sign,
+                )
+            ]
+            if base is not None and sign is not None
+            else []
+        ),
+        mci=MergeCompatibilityIndex(
+            score=70,
+            risk_tier="mixed_static_signals",
+            evidence_coverage=0.7,
+        ),
     )
 
 
-def test_slerp_for_compatible():
-    result = _make_result(avg_cos=0.95, sign_disagree=0.1, mci_score=85)
-    rec = recommend_strategy(result)
-    assert rec.method == MergeMethod.SLERP
+def test_pair_without_explicit_base_emits_slerp_baseline():
+    result = _result(explicit=False, candidate_count=2)
+    recommendation = recommend_strategy(result)
+    config = yaml.safe_load(recommendation.mergekit_yaml)
+    assert recommendation.method == MergeMethod.SLERP
+    assert config["base_model"] == "org/candidate-0"
+    assert [item["model"] for item in config["models"]] == [
+        "org/candidate-0",
+        "org/candidate-1",
+    ]
+    assert "optimal" not in recommendation.reasoning.lower()
 
 
-def test_ties_for_high_sign_disagreement():
-    result = _make_result(sign_disagree=0.4, mci_score=60)
-    rec = recommend_strategy(result)
-    assert rec.method == MergeMethod.TIES
+def test_high_sign_signal_does_not_claim_a_method_optimum():
+    result = _result(explicit=True, candidate_count=2, sign=0.5, energy=0.2)
+    recommendation = recommend_strategy(result)
+    config = yaml.safe_load(recommendation.mergekit_yaml)
+    assert recommendation.method == MergeMethod.TASK_ARITHMETIC
+    assert config["base_model"] == "org/actual-base"
+    assert {item["model"] for item in config["models"]} == {
+        "org/candidate-0",
+        "org/candidate-1",
+    }
+    assert all("weight" in item["parameters"] for item in config["models"])
+    assert all("density" not in item["parameters"] for item in config["models"])
 
 
-def test_dare_for_concentrated_energy():
-    result = _make_result(energy=0.85, sign_disagree=0.1, mci_score=70)
-    rec = recommend_strategy(result)
-    assert rec.method == MergeMethod.DARE_TIES
+def test_explicit_base_default_is_task_arithmetic_not_list_position():
+    result = _result(explicit=True, candidate_count=2, sign=0.1, energy=0.4)
+    recommendation = recommend_strategy(result)
+    config = yaml.safe_load(recommendation.mergekit_yaml)
+    assert recommendation.method == MergeMethod.TASK_ARITHMETIC
+    assert config["base_model"] == "org/actual-base"
 
 
-def test_linear_for_low_spectral():
-    result = _make_result(spectral=0.3, rank=0.4, sign_disagree=0.1, mci_score=50)
-    rec = recommend_strategy(result)
-    assert rec.method == MergeMethod.LINEAR
+def test_three_models_without_base_emits_equal_linear_baseline():
+    result = _result(explicit=False, candidate_count=3)
+    config = yaml.safe_load(_generate_yaml(MergeMethod.LINEAR, result))
+    assert [item["model"] for item in config["models"]] == [
+        "org/candidate-0",
+        "org/candidate-1",
+        "org/candidate-2",
+    ]
+    assert [item["parameters"]["weight"] for item in config["models"]] == [1 / 3] * 3
 
 
-def test_warning_for_low_mci():
-    result = _make_result(mci_score=20)
-    rec = recommend_strategy(result)
-    assert rec.confidence <= 0.4
-    assert len(rec.warnings) > 0
+def test_generated_yaml_is_accepted_by_installed_mergekit_parser():
+    pytest.importorskip("mergekit")
+
+    configurations = [
+        _generate_yaml(MergeMethod.SLERP, _result(explicit=False, candidate_count=2)),
+        _generate_yaml(
+            MergeMethod.TIES,
+            _result(explicit=True, candidate_count=2, sign=0.5),
+            density=0.5,
+        ),
+        _generate_yaml(MergeMethod.LINEAR, _result(explicit=False, candidate_count=3)),
+    ]
+    for configuration in configurations:
+        valid, target = validate_mergekit_yaml(configuration)
+        assert valid
+        assert target and target.startswith("mergekit ")

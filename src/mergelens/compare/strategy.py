@@ -1,224 +1,178 @@
-"""Merge strategy recommender — maps diagnostic profiles to optimal merge methods.
-
-Zhou et al. 2026 found only 46.7% metric overlap between what predicts
-success for different merge methods. Different diagnostic profiles
-map to different optimal methods.
-"""
+"""Rule-based MergeKit starting configurations with explicit limitations."""
 
 from __future__ import annotations
 
-import logging
+from importlib import metadata
+from typing import Any, cast
 
 import yaml
 
-from mergelens.models import (
-    CompareResult,
-    MergeMethod,
-    StrategyRecommendation,
-)
+from mergelens.models import CompareResult, MergeMethod, StrategyRecommendation
 
 
 def recommend_strategy(result: CompareResult) -> StrategyRecommendation:
-    """Recommend a merge strategy based on diagnostic profile.
+    """Choose a low-authority starting point from transparent static rules."""
 
-    Rule-based decision tree (interpretable, no training data needed):
-    - High cosine sim everywhere → SLERP
-    - Isolated conflict zones → SLERP with per-layer t overrides
-    - High sign disagreement (>30%) → TIES
-    - Concentrated task vector energy → DARE
-    - Low spectral overlap + high rank divergence → Linear with small alpha
-    - MCI < 30 → Warning: may not be compatible
-    """
-    mci = result.mci
-    metrics = result.layer_metrics
-    conflicts = result.conflict_zones
+    rows = result.tensor_metrics
+    cosine_values = [row.cosine_similarity for row in rows if row.cosine_similarity is not None]
+    sign_values = [
+        row.sign_disagreement_rate
+        for row in result.candidate_set_metrics
+        if row.sign_disagreement_rate is not None
+    ]
+    energy_values = [row.task_vector_energy for row in rows if row.task_vector_energy is not None]
+    spectral_values = [row.spectral_overlap for row in rows if row.spectral_overlap is not None]
+    average_cosine = sum(cosine_values) / len(cosine_values) if cosine_values else 0.0
+    average_sign = sum(sign_values) / len(sign_values) if sign_values else None
+    average_energy = sum(energy_values) / len(energy_values) if energy_values else None
+    average_spectral = sum(spectral_values) / len(spectral_values) if spectral_values else None
+    has_explicit_base = result.explicit_base is not None
+    signals = [f"parameter-weighted aggregate score: {result.mci.score}"]
+    if cosine_values:
+        signals.append(f"mean tensor cosine similarity: {average_cosine:.4f}")
+    if average_sign is not None:
+        signals.append(f"mean sign disagreement: {average_sign:.4f}")
+    if average_energy is not None:
+        signals.append(f"mean leading task-vector energy: {average_energy:.4f}")
+    if average_spectral is not None:
+        signals.append(f"mean left-subspace overlap: {average_spectral:.4f}")
 
-    # Aggregate diagnostic signals
-    avg_cos = sum(m.cosine_similarity for m in metrics) / max(len(metrics), 1)
-
-    sign_rates = [m.sign_disagreement_rate for m in metrics if m.sign_disagreement_rate is not None]
-    avg_sign_disagree = sum(sign_rates) / len(sign_rates) if sign_rates else 0.0
-
-    energy_scores = [m.task_vector_energy for m in metrics if m.task_vector_energy is not None]
-    avg_energy = sum(energy_scores) / len(energy_scores) if energy_scores else 0.5
-
-    spectral_scores = [m.spectral_overlap for m in metrics if m.spectral_overlap is not None]
-    avg_spectral = sum(spectral_scores) / len(spectral_scores) if spectral_scores else 0.5
-
-    rank_scores = [m.effective_rank_ratio for m in metrics if m.effective_rank_ratio is not None]
-    avg_rank_ratio = sum(rank_scores) / len(rank_scores) if rank_scores else 0.5
-
-    warnings: list[str] = []
-    per_layer_overrides: dict = {}
-
-    # Decision tree
-    if mci.score < 30:
-        return StrategyRecommendation(
-            method=MergeMethod.LINEAR,
-            confidence=0.3,
-            reasoning=(
-                f"MCI score is {mci.score}/100 ({mci.verdict}). "
-                "These models may not be compatible for merging. "
-                "If you proceed, use linear merge with very low weight (alpha=0.1-0.2)."
-            ),
-            mergekit_yaml=_generate_yaml(MergeMethod.LINEAR, result, alpha=0.1),
-            warnings=["Low compatibility detected. Merge quality likely to be poor."],
+    warnings = [
+        "This is a hand-specified starting point, not an optimal-method or quality prediction.",
+        "Evaluate merged-model behavior and capability retention after every candidate merge.",
+    ]
+    if result.tensor_conflict_regions:
+        warnings.append(
+            f"{len(result.tensor_conflict_regions)} ordered tensor region(s) were flagged for inspection; "
+            "no per-tensor MergeKit overrides were inferred from cosine alone."
         )
 
-    if avg_sign_disagree > 0.30:
-        # High sign disagreement → TIES resolves by design
-        confidence = 0.8 if avg_sign_disagree < 0.5 else 0.6
-        return StrategyRecommendation(
-            method=MergeMethod.TIES,
-            confidence=confidence,
-            reasoning=(
-                f"Sign disagreement rate is {avg_sign_disagree:.1%}, above 30% threshold. "
-                "TIES merging resolves sign conflicts by trimming, resetting, and electing dominant signs."
-            ),
-            mergekit_yaml=_generate_yaml(MergeMethod.TIES, result, density=0.5),
-            warnings=warnings,
-            per_layer_overrides=per_layer_overrides,
+    if not has_explicit_base and len(result.models) == 2:
+        method = MergeMethod.SLERP
+        strength = 0.40
+        reasoning = (
+            "Only pairwise static checkpoint signals are available. SLERP is provided as one "
+            "simple two-endpoint baseline to compare against linear interpolation."
         )
-
-    if avg_energy > 0.8:
-        # Concentrated energy → DARE (prune-then-merge preserves concentrated knowledge)
-        return StrategyRecommendation(
-            method=MergeMethod.DARE_TIES,
-            confidence=0.75,
-            reasoning=(
-                f"Task vector energy is highly concentrated (avg {avg_energy:.2f}). "
-                "DARE randomly prunes task vectors before merging, which works well "
-                "when knowledge is concentrated in few directions."
-            ),
-            mergekit_yaml=_generate_yaml(MergeMethod.DARE_TIES, result, density=0.5),
-            warnings=warnings,
+        config = _generate_yaml(method, result, t=0.5)
+    elif has_explicit_base:
+        method = MergeMethod.TASK_ARITHMETIC
+        strength = 0.40
+        reasoning = (
+            "An explicit shared base was supplied, so an equal-weight task-arithmetic configuration "
+            "preserves that role directly. The weights are placeholders for post-merge evaluation."
         )
-
-    if avg_spectral < 0.4 or avg_rank_ratio < 0.5:
-        # Low spectral overlap or high rank divergence → conservative linear
-        alpha = max(0.2, min(0.5, avg_cos - 0.3))
-        return StrategyRecommendation(
-            method=MergeMethod.LINEAR,
-            confidence=0.6,
-            reasoning=(
-                f"Low spectral overlap ({avg_spectral:.2f}) or rank divergence "
-                f"(ratio {avg_rank_ratio:.2f}). Models have different weight structure. "
-                f"Linear merge with conservative alpha={alpha:.2f} recommended."
-            ),
-            mergekit_yaml=_generate_yaml(MergeMethod.LINEAR, result, alpha=alpha),
-            warnings=warnings,
+        config = _generate_yaml(method, result)
+    else:
+        method = MergeMethod.LINEAR
+        strength = 0.30
+        reasoning = (
+            "No explicit shared base was supplied, so task-vector methods are not proposed. An "
+            "equal-weight linear merge is emitted only as a transparent baseline."
         )
+        config = _generate_yaml(method, result)
 
-    # Default: SLERP (good general-purpose method)
-    t = min(0.5, max(0.3, 1.0 - avg_cos))  # Lower t when models are more similar
-
-    # Add per-layer overrides for conflict zones, scaled by severity
-    severity_factor = {"low": 0.9, "medium": 0.7, "high": 0.5, "critical": 0.3}
-    if conflicts:
-        for zone in conflicts:
-            factor = severity_factor.get(
-                zone.severity.value if hasattr(zone.severity, "value") else str(zone.severity), 0.5
-            )
-            for layer_name in zone.layer_names:
-                per_layer_overrides[layer_name] = {"t": t * factor}
-        warnings.append(f"Found {len(conflicts)} conflict zone(s). Per-layer overrides applied.")
-
-    base_conf = 0.85 if avg_cos > 0.9 else 0.7
-    slerp_confidence = round(base_conf * min(mci.score / 75.0, 1.0), 2)
-
+    valid, target = validate_mergekit_yaml(config)
     return StrategyRecommendation(
-        method=MergeMethod.SLERP,
-        confidence=slerp_confidence,
-        reasoning=(
-            f"Models are generally compatible (cosine sim {avg_cos:.3f}, "
-            f"spectral overlap {avg_spectral:.2f}). "
-            f"SLERP with t={t:.2f} provides smooth interpolation."
+        method=method,
+        heuristic_strength=strength,
+        reasoning=reasoning,
+        triggering_signals=signals,
+        mergekit_yaml=config,
+        config_status="schema_validated" if valid else "illustrative",
+        validated_against=target if valid else None,
+        warnings=warnings
+        + (
+            []
+            if valid
+            else ["MergeKit is not installed in this runtime; schema validation was not run."]
         ),
-        mergekit_yaml=_generate_yaml(MergeMethod.SLERP, result, t=t),
-        warnings=warnings,
-        per_layer_overrides=per_layer_overrides,
     )
 
 
-def _generate_yaml(
-    method: MergeMethod,
-    result: CompareResult,
-    **params,
-) -> str:
-    """Generate a ready-to-use MergeKit YAML config."""
-    models = result.models
+def _generate_yaml(method: MergeMethod, result: CompareResult, **parameters: Any) -> str:
+    """Generate a conservative MergeKit configuration using current field placement."""
 
-    logger = logging.getLogger(__name__)
+    candidates = [model for model in result.models if model.role.value == "candidate"]
+    if not candidates:
+        candidates = result.models
+    merge_inputs = candidates if result.explicit_base is not None else result.models
 
     if method == MergeMethod.SLERP:
-        if len(models) > 2:
-            logger.warning("SLERP only supports 2 models; using first two, ignoring the rest.")
-        config = {
+        if result.explicit_base is not None:
+            endpoints = [result.explicit_base, candidates[0]]
+        else:
+            endpoints = result.models[:2]
+        if len(endpoints) != 2:
+            raise ValueError("SLERP generation requires exactly two endpoints.")
+        config: dict[str, Any] = {
+            "models": [{"model": endpoint.path_or_repo} for endpoint in endpoints],
             "merge_method": "slerp",
-            "slices": [
-                {
-                    "sources": [
-                        {
-                            "model": models[0].path_or_repo,
-                            "layer_range": [0, models[0].num_layers or 32],
-                        },
-                        {
-                            "model": models[1].path_or_repo,
-                            "layer_range": [0, models[1].num_layers or 32],
-                        },
-                    ],
-                }
-            ],
-            "parameters": {"t": params.get("t", 0.5)},
+            "base_model": endpoints[0].path_or_repo,
+            "parameters": {"t": float(parameters.get("t", 0.5))},
             "dtype": "bfloat16",
         }
-    elif method == MergeMethod.TIES:
+    elif method in {
+        MergeMethod.TASK_ARITHMETIC,
+        MergeMethod.TIES,
+        MergeMethod.DARE_TIES,
+        MergeMethod.DARE_LINEAR,
+        MergeMethod.DELLA,
+        MergeMethod.DELLA_LINEAR,
+        MergeMethod.BREADCRUMBS,
+        MergeMethod.BREADCRUMBS_TIES,
+    }:
+        if result.explicit_base is None:
+            raise ValueError(f"{method.value} generation requires an explicit shared base.")
+        per_model_weight = 1.0 / len(candidates)
+        models: list[dict[str, Any]] = []
+        for model in candidates:
+            model_parameters: dict[str, float] = {"weight": per_model_weight}
+            if method not in {MergeMethod.TASK_ARITHMETIC}:
+                model_parameters["density"] = float(parameters.get("density", 0.5))
+            models.append({"model": model.path_or_repo, "parameters": model_parameters})
         config = {
-            "merge_method": "ties",
-            "slices": [
-                {
-                    "sources": [{"model": m.path_or_repo} for m in models],
-                }
-            ],
-            "base_model": models[0].path_or_repo,
-            "parameters": {
-                "density": params.get("density", 0.5),
-                "weight": [1.0 / len(models)] * len(models),
-            },
-            "dtype": "bfloat16",
-        }
-    elif method in (MergeMethod.DARE_TIES, MergeMethod.DARE_LINEAR):
-        config = {
+            "models": models,
             "merge_method": method.value,
-            "slices": [
-                {
-                    "sources": [{"model": m.path_or_repo} for m in models],
-                }
-            ],
-            "base_model": models[0].path_or_repo,
-            "parameters": {
-                "density": params.get("density", 0.5),
-                "weight": [1.0 / len(models)] * len(models),
-            },
+            "base_model": result.explicit_base.path_or_repo,
+            "parameters": {"normalize": True},
             "dtype": "bfloat16",
         }
-    else:  # LINEAR
+    elif method == MergeMethod.LINEAR:
+        if len(merge_inputs) < 2:
+            raise ValueError("Linear generation requires at least two candidate models.")
+        alpha = parameters.get("alpha")
+        if alpha is not None and len(merge_inputs) == 2:
+            weights = [1.0 - float(alpha), float(alpha)]
+        else:
+            weights = [1.0 / len(merge_inputs)] * len(merge_inputs)
         config = {
-            "merge_method": "linear",
-            "slices": [
-                {
-                    "sources": [{"model": m.path_or_repo} for m in models],
-                }
+            "models": [
+                {"model": model.path_or_repo, "parameters": {"weight": weight}}
+                for model, weight in zip(merge_inputs, weights)
             ],
-            "parameters": {
-                "weight": (
-                    [params.get("alpha", 0.5), 1.0 - params.get("alpha", 0.5)]
-                    if len(models) == 2
-                    else [params.get("alpha", 0.5)]
-                    + [(1.0 - params.get("alpha", 0.5)) / (len(models) - 1)] * (len(models) - 1)
-                ),
-            },
+            "merge_method": "linear",
             "dtype": "bfloat16",
         }
+    else:
+        raise ValueError(f"Configuration generation is not implemented for {method.value}.")
 
-    return yaml.dump(config, default_flow_style=False, sort_keys=False)
+    return cast(str, yaml.safe_dump(config, sort_keys=False)).rstrip() + "\n"
+
+
+def validate_mergekit_yaml(yaml_content: str) -> tuple[bool, str | None]:
+    """Validate with the installed MergeKit parser when it is available."""
+
+    try:
+        from mergekit.config import (  # type: ignore[import-not-found, import-untyped]
+            MergeConfiguration,
+        )
+    except ImportError:
+        return False, None
+    raw = yaml.safe_load(yaml_content)
+    MergeConfiguration.model_validate(raw)
+    try:
+        version = metadata.version("mergekit")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+    return True, f"mergekit {version} MergeConfiguration"

@@ -7,20 +7,23 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  static-checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
-      - run: ruff check src/
-      - run: ruff format --check src/
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy src/mergelens
 
-  test:
+  tests:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
@@ -28,5 +31,49 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]"
-      - run: pytest --tb=short -q
+          cache: pip
+      - run: python -m pip install -e '.[dev,report]'
+      - run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install build
+      - run: python -m build
+      - name: Inspect wheel contents
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("*.whl"))
+          names = zipfile.ZipFile(wheel).namelist()
+          forbidden = ("/audit/", "/cache.py", "/tests/", "/examples/")
+          found = [name for name in names if any(item in name for item in forbidden)]
+          if found:
+              raise SystemExit(f"Forbidden wheel entries: {found}")
+          if not any(name.endswith("report/templates/base.html.j2") for name in names):
+              raise SystemExit("Report template missing from wheel")
+          print(f"Inspected {len(names)} wheel entries")
+          PY
+      - name: Fresh-wheel CLI, report, example, and MergeKit validation
+        run: |
+          python -m venv /tmp/mergelens-wheel
+          wheel_path=$(find dist -name '*.whl' -print -quit)
+          /tmp/mergelens-wheel/bin/python -m pip install "${wheel_path}[report,mcp]" 'mergekit==0.1.4' pytest
+          /tmp/mergelens-wheel/bin/python -m pip check
+          /tmp/mergelens-wheel/bin/python -c 'from mergelens.mcp.server import create_server; create_server()'
+          /tmp/mergelens-wheel/bin/mergelens --version
+          /tmp/mergelens-wheel/bin/mergelens --help
+          /tmp/mergelens-wheel/bin/mergelens compare --help
+          /tmp/mergelens-wheel/bin/mergelens diagnose --help
+          /tmp/mergelens-wheel/bin/python examples/synthetic_demo.py --output-dir /tmp/mergelens-demo-output
+          test -s /tmp/mergelens-demo-output/comparison.json
+          test -s /tmp/mergelens-demo-output/report.html
+          test -s /tmp/mergelens-demo-output/starting-config.yaml
+          /tmp/mergelens-wheel/bin/python -m pytest tests/test_strategy.py::test_generated_yaml_is_accepted_by_installed_mergekit_parser -q

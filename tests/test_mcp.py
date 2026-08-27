@@ -52,8 +52,9 @@ class TestDiagnoseInput:
 
 class TestCompatibilityInput:
     def test_valid(self):
-        inp = CompatibilityInput(models=["a", "b"])
+        inp = CompatibilityInput(models=["a", "b"], base_model="base")
         assert inp.device == "cpu"
+        assert inp.base_model == "base"
 
     def test_missing_models(self):
         with pytest.raises(ValidationError):
@@ -87,8 +88,9 @@ class TestLayerExplainInput:
 
 class TestReportInput:
     def test_valid(self):
-        inp = ReportInput(models=["a", "b"])
+        inp = ReportInput(models=["a", "b"], base_model="base")
         assert inp.output_path == "mergelens_report.html"
+        assert inp.base_model == "base"
 
     def test_custom_path(self):
         inp = ReportInput(models=["a"], output_path="out.html", device="cuda")
@@ -125,7 +127,6 @@ class TestMCPServer:
         assert server.name == "mergelens"
 
 
-
 def test_create_server_without_mcp_package(monkeypatch):
     """Verify ImportError with helpful message when mcp is missing."""
     import builtins
@@ -142,3 +143,9 @@ def test_create_server_without_mcp_package(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", mock_import)
     with pytest.raises(ImportError, match="mergelens\\[mcp\\]"):
         srv_mod.create_server()
+
+
+def test_unfinished_audit_package_is_not_importable():
+    import importlib.util
+
+    assert importlib.util.find_spec("mergelens.audit") is None

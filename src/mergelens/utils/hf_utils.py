@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from huggingface_hub import get_safetensors_metadata, hf_hub_download
+from huggingface_hub import HfApi, get_safetensors_metadata, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
 
@@ -18,6 +19,7 @@ class ModelMetadata:
     num_parameters: int | None = None
     safetensors_files: list[str] | None = None
     config: dict | None = None
+    revision: str | None = None
 
     def __post_init__(self):
         if self.safetensors_files is None:
@@ -78,11 +80,14 @@ def _get_local_metadata(local_path: str) -> ModelMetadata:
 
 def _get_hub_metadata(repo_id: str) -> ModelMetadata:
     """Get metadata from HuggingFace Hub (header-only, no download)."""
-    meta = ModelMetadata(repo_id=repo_id)
+    revision = HfApi().model_info(repo_id).sha
+    if not revision:
+        raise ValueError(f"Hugging Face did not return an immutable revision for {repo_id}.")
+    meta = ModelMetadata(repo_id=repo_id, revision=revision)
 
     try:
         # Get safetensors metadata (header-only — no model download)
-        st_meta = get_safetensors_metadata(repo_id)
+        st_meta = get_safetensors_metadata(repo_id, revision=revision)
         if st_meta and hasattr(st_meta, "parameter_count"):
             total = (
                 sum(st_meta.parameter_count.values())
@@ -102,7 +107,7 @@ def _get_hub_metadata(repo_id: str) -> ModelMetadata:
 
     try:
         # Download just config.json
-        config_path = hf_hub_download(repo_id, "config.json")
+        config_path = hf_hub_download(repo_id, "config.json", revision=revision)
         import json
 
         with open(config_path) as f:
@@ -127,11 +132,14 @@ def check_architecture_compatibility(models: list[str]) -> tuple[bool, str]:
     architectures = {m.architecture for m in metas if m.architecture}
 
     if len(architectures) <= 1:
-        return True, "Models have compatible architectures."
-    return False, f"Architecture mismatch: {architectures}. Models may not be mergeable."
+        return True, "Models report the same architecture identifier where metadata is present."
+    return False, (
+        f"Architecture identifiers differ: {architectures}. Inspect exact tensor coverage; "
+        "no numerical comparison should be inferred from this metadata check alone."
+    )
 
 
-def _estimate_params_from_config(config: dict) -> int | None:
+def _estimate_params_from_config(config: dict[str, Any]) -> int | None:
     """Rough parameter estimate from config.json fields."""
     h = config.get("hidden_size")
     n_layers = config.get("num_hidden_layers")
@@ -140,5 +148,5 @@ def _estimate_params_from_config(config: dict) -> int | None:
     if h and n_layers and v:
         # Very rough: embeddings + n_layers * (4*h*h + 2*h*inter) + lm_head
         inter = inter or 4 * h
-        return v * h + n_layers * (4 * h * h + 2 * h * inter) + v * h
+        return int(v * h + n_layers * (4 * h * h + 2 * h * inter) + v * h)
     return None

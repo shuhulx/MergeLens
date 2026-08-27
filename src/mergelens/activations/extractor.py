@@ -6,8 +6,23 @@ intermediate representations for CKA comparison.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
+from torch.utils.hooks import RemovableHandle
+
+
+@dataclass(frozen=True)
+class ActivationSet:
+    """Aligned activations and the identity of their calibration inputs."""
+
+    activations: dict[str, torch.Tensor]
+    calibration_id: str
+    sample_count: int
+    pooling_rule: str = "attention_mask_weighted_mean"
 
 
 class ActivationExtractor:
@@ -24,7 +39,8 @@ class ActivationExtractor:
         self.model = model
         self.layer_names = layer_names or []
         self._activations: dict[str, list[torch.Tensor]] = {}
-        self._hooks: list[torch.utils.hooks.RemovableHook] = []
+        self._hooks: list[RemovableHandle] = []
+        self._attention_mask: torch.Tensor | None = None
 
     def __enter__(self):
         self._register_hooks()
@@ -45,13 +61,29 @@ class ActivationExtractor:
         def hook_fn(module, input, output):
             if isinstance(output, tuple):
                 output = output[0]
-            # Store mean-pooled activations to save memory
             if output.ndim == 3:  # (batch, seq, hidden)
-                self._activations[name].append(output.mean(dim=1).detach().cpu())
+                if self._attention_mask is None:
+                    raise ValueError(
+                        "An attention mask is required for sequence activation pooling."
+                    )
+                mask = self._attention_mask.to(device=output.device, dtype=output.dtype)
+                if tuple(mask.shape) != tuple(output.shape[:2]):
+                    raise ValueError(
+                        f"Attention-mask shape {tuple(mask.shape)} does not align with "
+                        f"activation shape {tuple(output.shape)}."
+                    )
+                denominator = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                pooled = (output * mask.unsqueeze(-1)).sum(dim=1) / denominator
+                self._activations[name].append(pooled.detach().cpu())
             elif output.ndim == 2:  # (batch, hidden)
                 self._activations[name].append(output.detach().cpu())
 
         return hook_fn
+
+    def set_attention_mask(self, attention_mask: torch.Tensor | None) -> None:
+        """Set the mask used by hooks for the next forward pass."""
+
+        self._attention_mask = attention_mask
 
     def _remove_hooks(self):
         for hook in self._hooks:
@@ -72,6 +104,7 @@ class ActivationExtractor:
     def clear(self):
         """Clear stored activations."""
         self._activations = {name: [] for name in self.layer_names}
+        self._attention_mask = None
 
 
 def extract_activations(
@@ -82,7 +115,7 @@ def extract_activations(
     max_length: int = 512,
     batch_size: int = 8,
     device: str = "cpu",
-) -> dict[str, torch.Tensor]:
+) -> ActivationSet:
     """Extract activations from a model using calibration texts.
 
     Args:
@@ -95,7 +128,7 @@ def extract_activations(
         device: Torch device.
 
     Returns:
-        Dict mapping layer names to activation tensors (n_samples, hidden_dim).
+        ActivationSet containing tensors and a stable calibration-text identity.
     """
     model = model.to(device).eval()
     extractor = ActivationExtractor(model, layer_names=layer_names)
@@ -110,6 +143,17 @@ def extract_activations(
                 truncation=True,
                 max_length=max_length,
             ).to(device)
+            extractor.set_attention_mask(inputs.get("attention_mask"))
             model(**inputs)
 
-    return extractor.get_activations()
+    encoded_identity = json.dumps(
+        {"texts": calibration_texts, "max_length": max_length},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    calibration_id = hashlib.sha256(encoded_identity).hexdigest()
+    return ActivationSet(
+        activations=extractor.get_activations(),
+        calibration_id=calibration_id,
+        sample_count=len(calibration_texts),
+    )

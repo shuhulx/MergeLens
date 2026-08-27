@@ -1,26 +1,19 @@
-"""MergeLens — Pre-merge diagnostic framework for LLM model merging.
+"""MergeLens public API for static checkpoint inspection."""
 
-Usage:
-    from mergelens import compare_models, diagnose_config, generate_report
+from __future__ import annotations
 
-    result = compare_models(["model_a", "model_b"])
-    print(result.mci.score)  # 0-100 compatibility score
-"""
+from typing import Any
 
-from importlib import metadata
-
-try:
-    __version__ = metadata.version("mergelens")
-except metadata.PackageNotFoundError:
-    __version__ = "0.1.5"
-
+from mergelens.__about__ import __version__
 from mergelens.compare import compare_models
 from mergelens.diagnose import diagnose_config
-from mergelens.report import generate_report
 
-__all__ = [
-    "__version__",
-    "compare_models",
-    "diagnose_config",
-    "generate_report",
-]
+
+def generate_report(*args: Any, **kwargs: Any) -> str:
+    """Generate an HTML report, importing optional dependencies only when used."""
+    from mergelens.report import generate_report as _generate_report
+
+    return _generate_report(*args, **kwargs)
+
+
+__all__ = ["__version__", "compare_models", "diagnose_config", "generate_report"]

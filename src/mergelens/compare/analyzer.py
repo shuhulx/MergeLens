@@ -1,32 +1,63 @@
-"""Layer-by-layer model comparison orchestrator."""
+"""Evidence-aware, streaming checkpoint comparison orchestration."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Sequence
 
-logger = logging.getLogger(__name__)
+import torch
 from rich.progress import track
 
-from mergelens.compare.loader import ModelHandle, find_common_tensors, iter_aligned_tensors
+from mergelens.__about__ import __version__
+from mergelens.activations.cka import CKAComparison
+from mergelens.compare.loader import (
+    ModelHandle,
+    comparison_coverage,
+    find_common_tensors,
+    iter_aligned_tensors,
+    transformer_block_index,
+)
 from mergelens.compare.metrics import (
+    DEFAULT_METRICS,
+    DIAGNOSTIC_METRIC_NAMES,
+    DegenerateMetricInputError,
+    WeightDivergenceResourceLimitError,
     centered_task_vector_energy,
+    compute_heuristic_assessment,
     cosine_similarity,
     effective_rank_ratio,
-    kl_divergence,
     l2_distance,
-    merge_compatibility_index,
     sign_disagreement_rate,
     spectral_subspace_overlap,
     tsv_interference_score,
+    weight_distribution_divergence,
 )
 from mergelens.compare.strategy import recommend_strategy
 from mergelens.models import (
+    ActivationMetrics,
+    CandidateSetTensorMetrics,
     CompareResult,
-    ConflictZone,
-    LayerMetrics,
+    ComparisonCoverage,
+    LayerType,
+    MergeCompatibilityIndex,
+    MetricAvailability,
+    MetricObservation,
+    MetricStatus,
+    ModelRole,
     Severity,
+    TensorConflictRegion,
+    TensorMetrics,
 )
-from mergelens.utils.tensor_ops import compute_task_vector
+from mergelens.utils.tensor_ops import SVDResourceLimitError, compute_task_vector, flatten_to_2d
+
+logger = logging.getLogger(__name__)
+
+_LEGACY_METRIC_NAMES = {
+    "kl_divergence": "weight_distribution_divergence",
+    "spectral_subspace_overlap": "spectral_overlap",
+    "tsv_interference_score": "tsv_interference",
+    "centered_task_vector_energy": "task_vector_energy",
+}
 
 
 def compare_models(
@@ -37,322 +68,642 @@ def compare_models(
     svd_rank: int = 64,
     show_progress: bool = True,
     include_strategy: bool = True,
-    cka_scores: list[float] | None = None,
+    cka_comparisons: dict[str, CKAComparison] | None = None,
 ) -> CompareResult:
-    """Compare two or more models layer-by-layer.
+    """Compare two or more checkpoints using exact-shape tensor alignment.
 
-    Args:
-        model_paths: Paths or HF repo IDs for models to compare.
-        base_model: Optional base model for task vector computation.
-            If not provided, first model is used as base.
-        device: Torch device for computation ("cpu" or "cuda").
-        metrics: List of metric names to compute (None = all available).
-        svd_rank: Number of singular vectors for spectral metrics.
-        show_progress: Show rich progress bar.
-        include_strategy: Whether to include merge strategy recommendation.
-        cka_scores: Optional pre-computed CKA similarity scores per layer.
-            Use activations.cka.compare_activations_cka() to obtain these
-            and pass the resulting per-layer scores here so that the MCI
-            incorporates the activation-level similarity alongside weight
-            metrics.  Values must be in [0, 1].
-
-    Returns:
-        CompareResult with all metrics, conflict zones, MCI, and optional strategy.
+    ``metrics=None`` selects the documented default signals. The experimental
+    weight-distribution divergence must be requested explicitly. CKA values
+    must come from :func:`compare_activations_cka` and be keyed by candidate
+    path or candidate name.
     """
+
     if len(model_paths) < 2:
         raise ValueError("Need at least 2 models to compare.")
+    if svd_rank < 1:
+        raise ValueError("svd_rank must be at least 1.")
+    requested_metrics = _normalize_metric_selection(metrics)
+    if cka_comparisons and not all(
+        isinstance(comparison, CKAComparison) for comparison in cka_comparisons.values()
+    ):
+        raise TypeError("cka_comparisons values must be provenance-bearing CKAComparison objects.")
 
-    handles = [ModelHandle(p, device=device) for p in model_paths]
-    base_handle = ModelHandle(base_model, device=device) if base_model else handles[0]
-
-    all_handles = handles if base_model is None else [base_handle, *handles]
-    common_names = find_common_tensors(all_handles)
-
-    # Warn once if sign_disagreement_rate / tsv_interference will be skipped.
-    # These metrics require at least 2 task vectors (model_a - base, model_b - base),
-    # so they need either 3+ models or an explicit --base separate from the compared models.
-    _two_model_no_base = base_model is None and len(model_paths) == 2
-    if _two_model_no_base:
-        logger.info(
-            "sign_disagreement_rate and tsv_interference require an explicit --base model "
-            "(separate from the models being compared) so that independent task vectors can be "
-            "formed for each model. With only 2 models and no base these metrics will be None. "
-            "Pass base_model= to enable them."
-        )
-
-    if not common_names:
-        raise ValueError("No common tensor names found between models.")
-
-    # Number of "non-base" models — these are the models being scored against
-    # the base.  When no explicit base is given, handles[0] acts as base and
-    # the remaining len(handles)-1 models are scored against it.  When an
-    # explicit base is provided, all len(handles) models are scored.
-    n_scored = len(handles) if base_model else len(handles) - 1
-    n_scored = max(n_scored, 1)  # guard for edge case
-
-    # Per-model metric accumulators.  Indexing: per_model_cosines[i] collects
-    # cosine similarities for the i-th scored model vs. base across all layers.
-    # Keeping metrics separate per model prevents mixing values from models with
-    # different divergence profiles into a single flat list, which makes the
-    # resulting MCI average statistically meaningless.
-    per_model_cosines: list[list[float]] = [[] for _ in range(n_scored)]
-    per_model_spectral: list[list[float]] = [[] for _ in range(n_scored)]
-    per_model_rank_ratios: list[list[float]] = [[] for _ in range(n_scored)]
-    per_model_energy: list[list[float]] = [[] for _ in range(n_scored)]
-
-    # Multi-model metrics — these are inherently cross-model, so one list suffices.
-    all_sign_disagree: list[float] = []
-    all_tsv: list[float] = []
-
-    all_layer_metrics: list[LayerMetrics] = []
-
-    iterator = iter_aligned_tensors(all_handles, common_names)
-    if show_progress:
-        iterator = track(list(iterator), description="Comparing layers...")
-
-    for name, layer_type, tensors in iterator:
-        base_tensor = tensors[0]
-        model_tensors = tensors[1:]
-
-        for i, model_tensor in enumerate(model_tensors):
-            cos_sim = cosine_similarity(base_tensor, model_tensor)
-            l2_dist = l2_distance(base_tensor, model_tensor)
-
-            lm = LayerMetrics(
-                layer_name=name,
-                layer_type=layer_type,
-                shape=tuple(base_tensor.shape),
-                cosine_similarity=cos_sim,
-                l2_distance=l2_dist,
-            )
-
-            per_model_cosines[i].append(cos_sim)
-
-            try:
-                kl_div = kl_divergence(base_tensor, model_tensor)
-                lm.kl_divergence = kl_div
-            except Exception:
-                logger.debug("kl_divergence computation failed for %s", name, exc_info=True)
-
-            # Spectral overlap (only for 2D+ tensors with enough elements)
-            if base_tensor.numel() > 128:
-                try:
-                    spec_overlap = spectral_subspace_overlap(base_tensor, model_tensor, k=svd_rank)
-                    lm.spectral_overlap = spec_overlap
-                    per_model_spectral[i].append(spec_overlap)
-                except Exception:
-                    logger.debug(
-                        "spectral_subspace_overlap computation failed for %s", name, exc_info=True
-                    )
-
-                try:
-                    rank_r = effective_rank_ratio(base_tensor, model_tensor)
-                    lm.effective_rank_ratio = rank_r
-                    per_model_rank_ratios[i].append(rank_r)
-                except Exception:
-                    logger.debug(
-                        "effective_rank_ratio computation failed for %s", name, exc_info=True
-                    )
-
-            task_vec = compute_task_vector(model_tensor, base_tensor)
-
-            if task_vec.numel() > 64:
-                try:
-                    energy = centered_task_vector_energy(task_vec, k=svd_rank)
-                    lm.task_vector_energy = energy
-                    per_model_energy[i].append(energy)
-                except Exception:
-                    logger.debug(
-                        "centered_task_vector_energy computation failed for %s", name, exc_info=True
-                    )
-
-            all_layer_metrics.append(lm)
-
-        # Multi-model task vector metrics (need 2+ task vectors)
-        if len(model_tensors) >= 2:
-            task_vecs = [compute_task_vector(mt, base_tensor) for mt in model_tensors]
-
-            try:
-                sign_dis = sign_disagreement_rate(task_vecs)
-                all_sign_disagree.append(sign_dis)
-                for lm in all_layer_metrics[-len(model_tensors) :]:
-                    lm.sign_disagreement_rate = sign_dis
-            except Exception:
-                logger.debug(
-                    "sign_disagreement_rate computation failed for %s", name, exc_info=True
-                )
-
-            try:
-                tsv = tsv_interference_score(task_vecs, k=svd_rank)
-                all_tsv.append(tsv)
-                for lm in all_layer_metrics[-len(model_tensors) :]:
-                    lm.tsv_interference = tsv
-            except Exception:
-                logger.debug(
-                    "tsv_interference_score computation failed for %s", name, exc_info=True
-                )
-
-    # Compute one MCI per model (model vs. base), then average the MCI scores
-    # across models.  This prevents metrics from different models being mixed
-    # into a single flat list before averaging, which is statistically invalid
-    # when models diverge from the base by different amounts.
-    import numpy as _np
-
-    per_model_mcis = []
-    for i in range(n_scored):
-        if not per_model_cosines[i]:
-            continue
-        per_model_mcis.append(
-            merge_compatibility_index(
-                cosine_sims=per_model_cosines[i],
-                spectral_overlaps=per_model_spectral[i] or None,
-                rank_ratios=per_model_rank_ratios[i] or None,
-                sign_disagreements=all_sign_disagree or None,
-                tsv_scores=all_tsv or None,
-                energy_scores=per_model_energy[i] or None,
-                # CKA scores are activation-based and model-agnostic (one
-                # score per shared layer), so the same list is passed for
-                # every per-model MCI.  Callers obtain these via
-                # activations.cka.compare_activations_cka() and supply them
-                # through the cka_scores= parameter of compare_models().
-                cka_scores=cka_scores or None,
-            )
-        )
-
-    if not per_model_mcis:
-        from mergelens.models import MergeCompatibilityIndex as _MCI
-
-        mci = _MCI(
-            score=0.0,
-            confidence=0.0,
-            ci_lower=0.0,
-            ci_upper=0.0,
-            verdict="insufficient data",
-            components={},
-        )
-    elif len(per_model_mcis) == 1:
-        mci = per_model_mcis[0]
+    handles = [ModelHandle(path, device=device) for path in model_paths]
+    if base_model:
+        reference = ModelHandle(base_model, device=device)
+        candidates = handles
+        explicit_shared_base = True
     else:
-        # Average across models: use the most conservative (lowest) score as
-        # the primary value but report the mean verdict for transparency.
-        avg_score = float(_np.mean([m.score for m in per_model_mcis]))
-        avg_conf = float(_np.mean([m.confidence for m in per_model_mcis]))
-        avg_lower = float(_np.mean([m.ci_lower for m in per_model_mcis]))
-        avg_upper = float(_np.mean([m.ci_upper for m in per_model_mcis]))
-        # Merge component dicts by averaging shared keys
-        all_keys = set().union(*(m.components.keys() for m in per_model_mcis))
-        merged_components = {
-            k: float(_np.mean([m.components[k] for m in per_model_mcis if k in m.components]))
-            for k in all_keys
-        }
-        if avg_score >= 75:
-            verdict = "highly compatible"
-        elif avg_score >= 55:
-            verdict = "compatible"
-        elif avg_score >= 35:
-            verdict = "risky"
-        else:
-            verdict = "incompatible"
-        from mergelens.models import MergeCompatibilityIndex as _MCI
+        reference = handles[0]
+        candidates = handles[1:]
+        explicit_shared_base = False
 
-        mci = _MCI(
-            score=round(avg_score, 1),
-            confidence=round(avg_conf, 2),
-            ci_lower=round(avg_lower, 1),
-            ci_upper=round(avg_upper, 1),
-            verdict=verdict,
-            components=merged_components,
+    coverages = [
+        comparison_coverage(
+            reference,
+            candidate,
+            f"comparison_{index}",
+            explicit_shared_base=explicit_shared_base,
         )
+        for index, candidate in enumerate(candidates)
+    ]
 
-    # Detect conflict zones per model (each scored model vs. base), then
-    # deduplicate by taking the union.  Passing the flat all_layer_metrics
-    # directly would cause zones to span model boundaries because the list
-    # interleaves entries for different models (one entry per model per layer).
-    if n_scored == 1:
-        conflict_zones = _detect_conflict_zones(all_layer_metrics)
-    else:
-        seen_zone_keys: set[tuple] = set()
-        conflict_zones = []
-        for model_idx in range(n_scored):
-            model_metrics = all_layer_metrics[model_idx::n_scored]
-            for zone in _detect_conflict_zones(model_metrics):
-                key = (zone.start_layer, zone.end_layer, zone.severity)
-                if key not in seen_zone_keys:
-                    seen_zone_keys.add(key)
-                    conflict_zones.append(zone)
+    rows: list[TensorMetrics] = []
+    for coverage, candidate in zip(coverages, candidates):
+        names = find_common_tensors([reference, candidate])
+        iterator: Iterable[tuple[str, LayerType, list[torch.Tensor]]] = iter_aligned_tensors(
+            [reference, candidate], names
+        )
+        if show_progress:
+            iterator = track(
+                iterator,
+                total=len(names),
+                description=f"Comparing {candidate.info.name}...",
+            )
+        for position, (name, tensor_type, tensors) in enumerate(iterator):
+            reference_tensor, candidate_tensor = tensors
+            block = transformer_block_index(name)
+            row = TensorMetrics(
+                reference_model=reference.path_or_repo,
+                candidate_model=candidate.path_or_repo,
+                comparison_id=coverage.comparison_id,
+                tensor_name=name,
+                tensor_position=position,
+                transformer_block=block,
+                tensor_type=tensor_type,
+                shape=tuple(reference_tensor.shape),
+                parameter_count=reference_tensor.numel(),
+            )
+            finite_weight_inputs = _compute_pair_metrics(
+                row,
+                reference_tensor,
+                candidate_tensor,
+                requested_metrics=requested_metrics,
+                svd_rank=svd_rank,
+                explicit_shared_base=explicit_shared_base,
+            )
+            if not finite_weight_inputs:
+                coverage.scoring_supported = False
+                condition = (
+                    "Aggregate scoring is suppressed because at least one exact-shape tensor "
+                    "contains NaN or infinite values."
+                )
+                if condition not in coverage.unsupported_conditions:
+                    coverage.unsupported_conditions.append(condition)
+            rows.append(row)
 
-    result = CompareResult(
-        models=[h.info for h in handles],
-        layer_metrics=all_layer_metrics,
-        conflict_zones=conflict_zones,
-        mci=mci,
+    if not rows:
+        details = "; ".join(
+            f"{item.comparison_id}: {', '.join(item.unsupported_conditions) or 'no comparable tensors'}"
+            for item in coverages
+        )
+        raise ValueError(f"No exact-shape-compatible tensor comparisons are available. {details}")
+
+    candidate_set_metrics = _compute_cross_candidate_metrics(
+        reference,
+        candidates,
+        requested_metrics=requested_metrics,
+        svd_rank=svd_rank,
+        explicit_shared_base=explicit_shared_base,
+        show_progress=show_progress,
+    )
+    activation_metrics = _collect_activation_metrics(
+        reference,
+        candidates,
+        coverages,
+        requested_metrics=requested_metrics,
+        cka_comparisons=cka_comparisons,
     )
 
-    if include_strategy:
-        result.strategy = recommend_strategy(result)
+    availability = _summarize_metric_availability(rows)
+    if candidate_set_metrics:
+        availability = _replace_metric_availability(
+            availability,
+            _summarize_metric_availability(
+                candidate_set_metrics,
+                tuple(
+                    metric
+                    for metric in ("sign_disagreement_rate", "tsv_interference")
+                    if metric in requested_metrics
+                ),
+            ),
+        )
+    if activation_metrics:
+        availability = _replace_metric_availability(
+            availability,
+            [
+                MetricAvailability(
+                    metric="cka_similarity",
+                    status=MetricStatus.COMPUTED,
+                    computed_tensor_count=len(activation_metrics),
+                    affected_tensor_count=len(activation_metrics),
+                    reason="Computed as activation-layer evidence; not broadcast to tensor rows or used in the aggregate.",
+                )
+            ],
+        )
+    pair_assessments: dict[str, MergeCompatibilityIndex] = {}
+    for coverage in coverages:
+        pair_rows = [row for row in rows if row.comparison_id == coverage.comparison_id]
+        pair_availability = _summarize_metric_availability(pair_rows)
+        pair_assessments[coverage.comparison_id] = compute_heuristic_assessment(
+            pair_rows,
+            pair_availability,
+            scoring_supported=coverage.scoring_supported,
+        )
+    mci = _conservative_overall_assessment(pair_assessments, availability, coverages)
 
+    regions: list[TensorConflictRegion] = []
+    for coverage in coverages:
+        pair_rows = [row for row in rows if row.comparison_id == coverage.comparison_id]
+        regions.extend(_detect_tensor_conflict_regions(pair_rows))
+
+    if explicit_shared_base:
+        reference_info = reference.info_with_role(ModelRole.EXPLICIT_SHARED_BASE)
+        model_infos = [handle.info_with_role(ModelRole.CANDIDATE) for handle in handles]
+        explicit_base_info = reference_info
+    else:
+        reference_info = reference.info_with_role(ModelRole.IMPLICIT_REFERENCE)
+        model_infos = [reference_info] + [
+            handle.info_with_role(ModelRole.CANDIDATE) for handle in candidates
+        ]
+        explicit_base_info = None
+
+    result = CompareResult(
+        models=model_infos,
+        reference_model=reference_info,
+        explicit_base=explicit_base_info,
+        coverage=coverages,
+        tensor_metrics=rows,
+        candidate_set_metrics=candidate_set_metrics,
+        activation_metrics=activation_metrics,
+        tensor_conflict_regions=regions,
+        mci=mci,
+        pair_assessments=pair_assessments,
+        metric_availability=availability,
+        metadata={
+            "mergelens_version": __version__,
+            "device": device,
+            "svd_rank": svd_rank,
+            "requested_metrics": sorted(requested_metrics),
+            "total_diagnostic_signals": len(DIAGNOSTIC_METRIC_NAMES),
+            "explicit_shared_base": explicit_shared_base,
+            "aggregate_rule": "minimum_pair_score",
+            "cka_provenance": {
+                key: {
+                    "calibration_id": comparison.calibration_id,
+                    "sample_count": comparison.sample_count,
+                    "pooling_rule": comparison.pooling_rule,
+                    "aligned_layers": list(comparison.aligned_layers),
+                    "feature_dimensions": comparison.feature_dimensions,
+                    "warnings": list(comparison.warnings),
+                }
+                for key, comparison in (cka_comparisons or {}).items()
+            },
+            "streaming_note": (
+                "Tensor groups are iterated lazily. Peak memory also includes float32 conversions, "
+                "task vectors, bounded SVD workspaces, result rows, and framework overhead."
+            ),
+        },
+    )
+    if include_strategy and result.mci.score is not None:
+        result.strategy = recommend_strategy(result)
     return result
 
 
-def _detect_conflict_zones(
-    layer_metrics: list[LayerMetrics],
-    cos_threshold: float = 0.80,
-    min_zone_size: int = 2,
-) -> list[ConflictZone]:
-    """Detect contiguous groups of layers with high disagreement."""
-    zones: list[ConflictZone] = []
-    current_zone_layers: list[tuple[int, LayerMetrics]] = []
+def _normalize_metric_selection(metrics: list[str] | None) -> frozenset[str]:
+    if metrics is None:
+        return DEFAULT_METRICS
+    normalized = {_LEGACY_METRIC_NAMES.get(name, name) for name in metrics}
+    unknown = normalized - set(DIAGNOSTIC_METRIC_NAMES)
+    if unknown:
+        raise ValueError(
+            f"Unknown metric(s): {', '.join(sorted(unknown))}. "
+            f"Supported metrics: {', '.join(DIAGNOSTIC_METRIC_NAMES)}"
+        )
+    return frozenset(normalized)
 
-    for i, lm in enumerate(layer_metrics):
-        if lm.cosine_similarity < cos_threshold:
-            current_zone_layers.append((i, lm))
+
+def _set_observation(
+    row: TensorMetrics | CandidateSetTensorMetrics,
+    metric: str,
+    status: MetricStatus,
+    reason: str | None = None,
+) -> None:
+    row.metric_observations[metric] = MetricObservation(status=status, reason=reason)
+
+
+def _compute_pair_metrics(
+    row: TensorMetrics,
+    reference_tensor: torch.Tensor,
+    candidate_tensor: torch.Tensor,
+    *,
+    requested_metrics: frozenset[str],
+    svd_rank: int,
+    explicit_shared_base: bool,
+) -> bool:
+    for metric in DIAGNOSTIC_METRIC_NAMES:
+        if metric not in requested_metrics:
+            _set_observation(
+                row, metric, MetricStatus.SKIPPED_BY_USER, "Not selected for this run."
+            )
+    for metric, reason in (
+        (
+            "sign_disagreement_rate",
+            "Candidate-set task-vector signal requiring an explicit shared base and at least two candidates; see candidate_set_metrics.",
+        ),
+        (
+            "tsv_interference",
+            "Candidate-set task-vector signal requiring an explicit shared base and at least two candidates; see candidate_set_metrics.",
+        ),
+        (
+            "cka_similarity",
+            "Activation-layer signal; no aligned calibration activations are stored on tensor rows; see activation_metrics.",
+        ),
+    ):
+        if metric in requested_metrics:
+            _set_observation(row, metric, MetricStatus.STRUCTURALLY_UNAVAILABLE, reason)
+
+    finite_weight_inputs = bool(
+        torch.isfinite(reference_tensor).all() and torch.isfinite(candidate_tensor).all()
+    )
+    if not finite_weight_inputs:
+        reason = "Reference or candidate tensor contains NaN or infinite values."
+        for metric in requested_metrics - {
+            "cka_similarity",
+            "sign_disagreement_rate",
+            "tsv_interference",
+        }:
+            _set_observation(row, metric, MetricStatus.UNSUPPORTED_INPUT, reason)
+
+    if finite_weight_inputs and "cosine_similarity" in requested_metrics:
+        row.cosine_similarity = cosine_similarity(reference_tensor, candidate_tensor)
+        _set_observation(row, "cosine_similarity", MetricStatus.COMPUTED)
+    if finite_weight_inputs and "l2_distance" in requested_metrics:
+        row.l2_distance = l2_distance(reference_tensor, candidate_tensor)
+        _set_observation(row, "l2_distance", MetricStatus.COMPUTED)
+
+    if finite_weight_inputs and "weight_distribution_divergence" in requested_metrics:
+        try:
+            row.weight_distribution_divergence = weight_distribution_divergence(
+                reference_tensor, candidate_tensor
+            )
+            _set_observation(row, "weight_distribution_divergence", MetricStatus.COMPUTED)
+        except WeightDivergenceResourceLimitError as exc:
+            _set_observation(
+                row,
+                "weight_distribution_divergence",
+                MetricStatus.RESOURCE_LIMIT_SKIPPED,
+                str(exc),
+            )
+
+    for metric, function, attribute in (
+        ("spectral_overlap", spectral_subspace_overlap, "spectral_overlap"),
+        ("effective_rank_ratio", effective_rank_ratio, "effective_rank_ratio"),
+    ):
+        if metric not in requested_metrics or not finite_weight_inputs:
+            continue
+        if min(flatten_to_2d(reference_tensor).shape) < 2:
+            _set_observation(
+                row,
+                metric,
+                MetricStatus.STRUCTURALLY_UNAVAILABLE,
+                "Vectors and one-row matrices do not provide an informative spectral comparison.",
+            )
+            continue
+        try:
+            value = (
+                function(reference_tensor, candidate_tensor, k=svd_rank)
+                if metric == "spectral_overlap"
+                else function(reference_tensor, candidate_tensor)
+            )
+            setattr(row, attribute, value)
+            _set_observation(row, metric, MetricStatus.COMPUTED)
+        except SVDResourceLimitError as exc:
+            _set_observation(row, metric, MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc))
+        except DegenerateMetricInputError as exc:
+            _set_observation(row, metric, MetricStatus.STRUCTURALLY_UNAVAILABLE, str(exc))
+        except RuntimeError as exc:
+            logger.warning("Numerical failure in %s for %s: %s", metric, row.tensor_name, exc)
+            _set_observation(row, metric, MetricStatus.FAILED_NUMERICALLY, str(exc))
+
+    if finite_weight_inputs and "task_vector_energy" in requested_metrics:
+        if not explicit_shared_base:
+            _set_observation(
+                row,
+                "task_vector_energy",
+                MetricStatus.STRUCTURALLY_UNAVAILABLE,
+                "An explicit shared base is required to interpret the difference as a task vector.",
+            )
         else:
-            if len(current_zone_layers) >= min_zone_size:
-                zones.append(_build_zone(current_zone_layers))
-            current_zone_layers = []
+            try:
+                task_vector = compute_task_vector(candidate_tensor, reference_tensor)
+                row.task_vector_energy = centered_task_vector_energy(task_vector, k=svd_rank)
+                _set_observation(row, "task_vector_energy", MetricStatus.COMPUTED)
+            except SVDResourceLimitError as exc:
+                _set_observation(
+                    row, "task_vector_energy", MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc)
+                )
+            except DegenerateMetricInputError as exc:
+                _set_observation(
+                    row, "task_vector_energy", MetricStatus.STRUCTURALLY_UNAVAILABLE, str(exc)
+                )
+            except RuntimeError as exc:
+                logger.warning(
+                    "Numerical failure in task_vector_energy for %s: %s", row.tensor_name, exc
+                )
+                _set_observation(
+                    row, "task_vector_energy", MetricStatus.FAILED_NUMERICALLY, str(exc)
+                )
 
-    # Don't forget the last zone
-    if len(current_zone_layers) >= min_zone_size:
-        zones.append(_build_zone(current_zone_layers))
-
-    return zones
+    return finite_weight_inputs
 
 
-def _build_zone(layers: list[tuple[int, LayerMetrics]]) -> ConflictZone:
-    """Build a ConflictZone from a list of (index, LayerMetrics)."""
-    indices = [i for i, _ in layers]
-    metrics = [lm for _, lm in layers]
-    avg_cos = sum(lm.cosine_similarity for lm in metrics) / len(metrics)
+def _compute_cross_candidate_metrics(
+    reference: ModelHandle,
+    candidates: list[ModelHandle],
+    *,
+    requested_metrics: frozenset[str],
+    svd_rank: int,
+    explicit_shared_base: bool,
+    show_progress: bool,
+) -> list[CandidateSetTensorMetrics]:
+    selected = requested_metrics & {"sign_disagreement_rate", "tsv_interference"}
+    if not selected or not explicit_shared_base or len(candidates) < 2:
+        return []
 
-    sign_disagrees = [
-        lm.sign_disagreement_rate for lm in metrics if lm.sign_disagreement_rate is not None
+    common_names = find_common_tensors([reference, *candidates])
+    iterator: Iterable[tuple[str, LayerType, list[torch.Tensor]]] = iter_aligned_tensors(
+        [reference, *candidates], common_names
+    )
+    if show_progress:
+        iterator = track(iterator, total=len(common_names), description="Comparing task vectors...")
+    result: list[CandidateSetTensorMetrics] = []
+    for position, (name, tensor_type, tensors) in enumerate(iterator):
+        base_tensor, candidate_tensors = tensors[0], tensors[1:]
+        row = CandidateSetTensorMetrics(
+            candidate_set_id="candidate_set_0",
+            base_model=reference.path_or_repo,
+            candidate_models=[candidate.path_or_repo for candidate in candidates],
+            tensor_name=name,
+            tensor_position=position,
+            transformer_block=transformer_block_index(name),
+            tensor_type=tensor_type,
+            shape=tuple(base_tensor.shape),
+            parameter_count=base_tensor.numel(),
+        )
+        if not all(bool(torch.isfinite(tensor).all()) for tensor in tensors):
+            reason = (
+                "A base or candidate tensor required for the cross-candidate signal contains "
+                "NaN or infinite values."
+            )
+            for metric in selected:
+                _set_observation(row, metric, MetricStatus.UNSUPPORTED_INPUT, reason)
+            result.append(row)
+            continue
+        task_vectors = [compute_task_vector(tensor, base_tensor) for tensor in candidate_tensors]
+        if "sign_disagreement_rate" in selected:
+            row.sign_disagreement_rate = sign_disagreement_rate(task_vectors)
+            _set_observation(row, "sign_disagreement_rate", MetricStatus.COMPUTED)
+        if "tsv_interference" in selected:
+            try:
+                row.tsv_interference = tsv_interference_score(task_vectors, k=svd_rank)
+                _set_observation(row, "tsv_interference", MetricStatus.COMPUTED)
+            except SVDResourceLimitError as exc:
+                _set_observation(
+                    row, "tsv_interference", MetricStatus.RESOURCE_LIMIT_SKIPPED, str(exc)
+                )
+            except DegenerateMetricInputError as exc:
+                _set_observation(
+                    row, "tsv_interference", MetricStatus.STRUCTURALLY_UNAVAILABLE, str(exc)
+                )
+            except RuntimeError as exc:
+                logger.warning("Numerical failure in TSV interference for %s: %s", name, exc)
+                _set_observation(row, "tsv_interference", MetricStatus.FAILED_NUMERICALLY, str(exc))
+        result.append(row)
+    return result
+
+
+def _collect_activation_metrics(
+    reference: ModelHandle,
+    candidates: list[ModelHandle],
+    coverages: list[ComparisonCoverage],
+    *,
+    requested_metrics: frozenset[str],
+    cka_comparisons: dict[str, CKAComparison] | None,
+) -> list[ActivationMetrics]:
+    if "cka_similarity" not in requested_metrics or not cka_comparisons:
+        return []
+    result: list[ActivationMetrics] = []
+    for coverage, candidate in zip(coverages, candidates):
+        comparison = next(
+            (
+                cka_comparisons[key]
+                for key in (candidate.path_or_repo, candidate.info.name)
+                if key in cka_comparisons
+            ),
+            None,
+        )
+        if comparison is None:
+            continue
+        for layer, score in comparison.scores.items():
+            if not 0.0 <= score <= 1.0:
+                raise ValueError(f"CKA score for {layer} must be in [0, 1], got {score}.")
+            widths = comparison.feature_dimensions[layer]
+            result.append(
+                ActivationMetrics(
+                    comparison_id=coverage.comparison_id,
+                    reference_model=reference.path_or_repo,
+                    candidate_model=candidate.path_or_repo,
+                    activation_layer=layer,
+                    cka_similarity=score,
+                    calibration_id=comparison.calibration_id,
+                    sample_count=comparison.sample_count,
+                    pooling_rule=comparison.pooling_rule,
+                    reference_feature_count=widths[0],
+                    candidate_feature_count=widths[1],
+                    warnings=list(comparison.warnings),
+                )
+            )
+    return result
+
+
+def _summarize_metric_availability(
+    rows: Sequence[TensorMetrics | CandidateSetTensorMetrics],
+    metric_names: tuple[str, ...] = DIAGNOSTIC_METRIC_NAMES,
+) -> list[MetricAvailability]:
+    summaries: list[MetricAvailability] = []
+    priority = (
+        MetricStatus.FAILED_NUMERICALLY,
+        MetricStatus.RESOURCE_LIMIT_SKIPPED,
+        MetricStatus.UNSUPPORTED_INPUT,
+        MetricStatus.STRUCTURALLY_UNAVAILABLE,
+        MetricStatus.SKIPPED_BY_USER,
+    )
+    for metric in metric_names:
+        observations = [row.metric_observations[metric] for row in rows]
+        computed = sum(item.status == MetricStatus.COMPUTED for item in observations)
+        affected_parameters = sum(row.parameter_count for row in rows)
+        computed_parameters = sum(
+            row.parameter_count
+            for row, observation in zip(rows, observations)
+            if observation.status == MetricStatus.COMPUTED
+        )
+        parameter_coverage = (
+            computed_parameters / affected_parameters if affected_parameters else None
+        )
+        if computed:
+            unavailable_count = len(observations) - computed
+            reason = (
+                f"Computed for {computed}/{len(observations)} tensor comparisons; "
+                f"{unavailable_count} had a documented unavailable or skipped status."
+                if unavailable_count
+                else None
+            )
+            summaries.append(
+                MetricAvailability(
+                    metric=metric,
+                    status=MetricStatus.COMPUTED,
+                    reason=reason,
+                    computed_tensor_count=computed,
+                    affected_tensor_count=len(observations),
+                    computed_parameter_count=computed_parameters,
+                    affected_parameter_count=affected_parameters,
+                    parameter_coverage=parameter_coverage,
+                )
+            )
+            continue
+        status = next(
+            candidate
+            for candidate in priority
+            if any(item.status == candidate for item in observations)
+        )
+        reasons = sorted({item.reason for item in observations if item.reason})
+        summaries.append(
+            MetricAvailability(
+                metric=metric,
+                status=status,
+                reason="; ".join(reasons) if reasons else None,
+                affected_tensor_count=len(observations),
+                affected_parameter_count=affected_parameters,
+                parameter_coverage=parameter_coverage,
+            )
+        )
+    return summaries
+
+
+def _replace_metric_availability(
+    current: list[MetricAvailability], replacements: list[MetricAvailability]
+) -> list[MetricAvailability]:
+    by_name = {item.metric: item for item in replacements}
+    return [by_name.get(item.metric, item) for item in current]
+
+
+def _conservative_overall_assessment(
+    pair_assessments: dict[str, MergeCompatibilityIndex],
+    availability: list[MetricAvailability],
+    coverages: list[ComparisonCoverage],
+) -> MergeCompatibilityIndex:
+    if not all(coverage.scoring_supported for coverage in coverages):
+        return MergeCompatibilityIndex(
+            score=None,
+            risk_tier="insufficient_evidence",
+            evidence_coverage=0.0,
+            available_metrics=[
+                item.metric for item in availability if item.status == MetricStatus.COMPUTED
+            ],
+            unavailable_metrics=[
+                item for item in availability if item.status != MetricStatus.COMPUTED
+            ],
+            notes=[
+                "Aggregate scoring was suppressed because at least one pair has an unsupported structural condition."
+            ],
+        )
+    scored = [
+        assessment for assessment in pair_assessments.values() if assessment.score is not None
     ]
-    avg_sign = sum(sign_disagrees) / len(sign_disagrees) if sign_disagrees else None
+    if len(scored) != len(pair_assessments):
+        return MergeCompatibilityIndex(
+            score=None,
+            risk_tier="insufficient_evidence",
+            available_metrics=[
+                item.metric for item in availability if item.status == MetricStatus.COMPUTED
+            ],
+            unavailable_metrics=[
+                item for item in availability if item.status != MetricStatus.COMPUTED
+            ],
+        )
+    conservative = min(scored, key=lambda assessment: float(assessment.score or 0.0)).model_copy(
+        deep=True
+    )
+    conservative.available_metrics = [
+        item.metric for item in availability if item.status == MetricStatus.COMPUTED
+    ]
+    conservative.unavailable_metrics = [
+        item for item in availability if item.status != MetricStatus.COMPUTED
+    ]
+    conservative.partial_metrics = [
+        item
+        for item in availability
+        if item.status == MetricStatus.COMPUTED and (item.parameter_coverage or 0.0) < 1.0
+    ]
+    conservative.notes.append(
+        "For multi-candidate runs, the aggregate score is the lowest pair score, not an average."
+    )
+    return conservative
 
-    if avg_cos < 0.5:
+
+def _detect_tensor_conflict_regions(
+    rows: list[TensorMetrics],
+    cosine_threshold: float = 0.80,
+    minimum_region_size: int = 1,
+) -> list[TensorConflictRegion]:
+    """Identify ordered tensor ranges triggered by a heuristic cosine threshold."""
+
+    regions: list[TensorConflictRegion] = []
+    current: list[TensorMetrics] = []
+    for row in rows:
+        if row.cosine_similarity is not None and row.cosine_similarity < cosine_threshold:
+            current.append(row)
+        else:
+            if len(current) >= minimum_region_size:
+                regions.append(_build_tensor_region(current))
+            current = []
+    if len(current) >= minimum_region_size:
+        regions.append(_build_tensor_region(current))
+    return regions
+
+
+def _build_tensor_region(rows: list[TensorMetrics]) -> TensorConflictRegion:
+    cosine_values = [
+        float(row.cosine_similarity) for row in rows if row.cosine_similarity is not None
+    ]
+    average_cosine = sum(cosine_values) / len(cosine_values)
+    if average_cosine < 0.5:
         severity = Severity.CRITICAL
-    elif avg_cos < 0.7:
+    elif average_cosine < 0.7:
         severity = Severity.HIGH
-    elif avg_cos < 0.8:
+    elif average_cosine < 0.8:
         severity = Severity.MEDIUM
     else:
         severity = Severity.LOW
-
-    if severity == Severity.CRITICAL:
-        rec = "Critical conflict zone. Consider excluding these layers from merge or using passthrough."
-    elif severity == Severity.HIGH:
-        rec = "High conflict. Use TIES merging with sign resolution or reduce merge weight for these layers."
-    elif severity == Severity.MEDIUM:
-        rec = "Moderate conflict. SLERP with reduced t value recommended for these layers."
-    else:
-        rec = "Minor conflict. Standard merge parameters should work."
-
-    return ConflictZone(
-        start_layer=indices[0],
-        end_layer=indices[-1],
-        layer_names=[lm.layer_name for lm in metrics],
+    triggers = [f"mean cosine similarity {average_cosine:.4f} below heuristic 0.80 threshold"]
+    return TensorConflictRegion(
+        comparison_id=rows[0].comparison_id,
+        reference_model=rows[0].reference_model,
+        candidate_model=rows[0].candidate_model,
+        start_tensor_position=rows[0].tensor_position,
+        end_tensor_position=rows[-1].tensor_position,
+        tensor_names=[row.tensor_name for row in rows],
         severity=severity,
-        avg_cosine_sim=round(avg_cos, 4),
-        avg_sign_disagreement=round(avg_sign, 4) if avg_sign is not None else None,
-        recommendation=rec,
+        avg_cosine_similarity=round(average_cosine, 4),
+        avg_sign_disagreement=None,
+        triggering_signals=triggers,
+        heuristic_inspection_note=(
+            "Inspection priority only. Review these exact tensors and evaluate any merge-method or "
+            "weight changes after merging; this static signal does not establish that a particular "
+            "method will improve behavior."
+        ),
     )
+
+
+_detect_conflict_zones = _detect_tensor_conflict_regions

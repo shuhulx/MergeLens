@@ -1,161 +1,113 @@
-<p align="center">
-  <h1 align="center">MergeLens</h1>
-  <p align="center"><strong>Pre-merge diagnostics for LLM model merging</strong></p>
-  <p align="center">
-    <a href="https://pypi.org/project/mergelens/"><img src="https://img.shields.io/pypi/v/mergelens" alt="PyPI"></a>
-    <a href="https://pypi.org/project/mergelens/"><img src="https://img.shields.io/pypi/pyversions/mergelens" alt="Python"></a>
-    <a href="https://github.com/shuhulx/mergelens/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
-    <a href="https://pypi.org/project/mergelens/"><img src="https://img.shields.io/pypi/dm/mergelens" alt="Downloads"></a>
-    <img src="https://img.shields.io/badge/tests-213%20passed-brightgreen.svg" alt="Tests">
-  </p>
-</p>
+# MergeLens
 
----
+[![CI](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml/badge.svg)](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mergelens)](https://pypi.org/project/mergelens/)
+[![Python](https://img.shields.io/pypi/pyversions/mergelens)](https://pypi.org/project/mergelens/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/shuhulx/mergelens/blob/main/LICENSE)
 
-34% of top Open LLM Leaderboard models are merges, yet merging is blind trial-and-error. MergeLens tells you **before you merge** whether it will work — and which method to use.
+MergeLens is an experimental inspection toolkit for homologous LLM checkpoints. It reports exact tensor coverage and weight, spectral, task-vector, and optional activation-similarity signals; highlights tensors worth inspecting; and proposes a rule-based MergeKit starting configuration. It is intended for model-merging researchers and engineers who need inspectable evidence before spending compute on candidate merges.
 
-## Features
+MergeLens does **not** establish downstream merged-model quality, capability retention, or the best merge method. Its aggregate score and thresholds are hand-specified, unvalidated heuristics. Post-merge behavioural evaluation remains necessary.
 
-- **Single compatibility score** — Merge Compatibility Index (MCI): 0-100, go/no-go verdict
-- **10 diagnostic metrics** — cosine similarity, spectral overlap, sign disagreement, TSV interference, CKA, and more
-- **Strategy recommender** — optimal merge method + ready-to-paste MergeKit YAML
-- **Conflict zone detection** — pinpoints problematic layers
-- **Interactive HTML reports** — self-contained Plotly dashboards
-- **MCP server** — AI assistants can diagnose merges natively
-- **Memory efficient** — lazy safetensors loading, peak memory = 2× largest layer
+Run a local software demonstration with tiny synthetic safetensors:
+
+```bash
+pip install -e .
+pip install -e '.[report]'
+python examples/synthetic_demo.py --output-dir demo-output
+```
+
+The example is a software and known-answer demonstration, not scientific validation of merge outcomes.
 
 ## Install
 
 ```bash
 pip install mergelens
+pip install 'mergelens[report]'  # offline HTML reports
+pip install 'mergelens[mcp]'     # MCP server
 ```
 
-Optional extras:
-
-```bash
-pip install mergelens[report]  # Interactive HTML report generation
-pip install mergelens[mcp]    # MCP server for AI assistants
-pip install mergelens[audit]  # Capability probing (requires transformers)
-pip install mergelens[all]    # Everything
-```
-
-## Quick Start
-
-### CLI
-
-Compare two models (local paths or HuggingFace Hub IDs):
+## Compare checkpoints
 
 ```bash
 mergelens compare model_a/ model_b/
-mergelens compare meta-llama/Llama-3-8B mistralai/Mistral-7B-v0.1
-```
-
-Add a base model for task vector metrics:
-
-```bash
-mergelens compare model_a/ model_b/ --base base_model/
-```
-
-Generate an interactive HTML report:
-
-```bash
+mergelens compare finetune_a/ finetune_b/ --base shared_base/
+mergelens compare model_a/ model_b/ --metric cosine_similarity --metric l2_distance --json result.json
 mergelens compare model_a/ model_b/ --report report.html
-mergelens compare model_a/ model_b/ --base base_model/ --report report.html
 ```
 
-The HTML report is a single self-contained file with embedded Plotly charts — no server required.
+The result exposes:
 
-**Report contents:**
-- **MCI Gauge** — score, verdict, confidence interval
-- **MCI Components** — per-metric breakdown table
-- **Weight Similarity Heatmap** — layer × model-pair cosine similarity grid
-- **Spectral Analysis Dashboard** — spectral overlap, rank ratio, task vector energy, and sign disagreement across layers
-- **Layer Divergence Chart** — L2 distance (bars) and sign disagreement rate (line) on dual axes
-- **Conflict Zone Analysis** — bar chart + table with severity, layer range, and recommendation per zone
-- **Layer Metrics Table** — raw values for all metrics per layer, scrollable
-- **Strategy Recommendation** — method, confidence, reasoning, and copy-paste MergeKit YAML
+- the reference and candidate identity for every pair-tensor row;
+- separately attributable `candidate_set_metrics` for sign/TSV and `activation_metrics` for CKA;
+- total tensors and parameters, missing names, shape/dtype issues, and exact comparable coverage;
+- architecture metadata and known structural incompatibilities;
+- a status and reason for every computed, skipped, unavailable, failed, or resource-limited signal;
+- raw parameter-weighted heuristic components, with partial availability reducing component weight by parameter coverage;
+- a machine-readable `validation_status: heuristic_unvalidated`;
+- pair-bounded tensor inspection regions; and
+- an illustrative or parser-validated MergeKit starting configuration.
 
-Diagnose a MergeKit config before running it:
+Structurally unsupported comparisons retain their raw coverage and measurements but suppress aggregate scoring.
 
-```bash
-mergelens diagnose merge.yaml
-```
-
-### Python API
+Python API:
 
 ```python
 from mergelens import compare_models
 
 result = compare_models(["model_a/", "model_b/"])
 
-print(f"MCI: {result.mci.score} — {result.mci.verdict}")
-# MCI: 72.3 — compatible
+print(result.coverage[0].parameter_coverage_reference)
+print(result.mci.score)  # float or None when suppressed
+print(result.mci.risk_tier)
+print(result.mci.validation_status)  # heuristic_unvalidated
+
+for row in result.tensor_metrics:
+    print(row.reference_model, row.candidate_model, row.tensor_name, row.cosine_similarity)
+
+for row in result.candidate_set_metrics:
+    print(row.base_model, row.candidate_models, row.tensor_name, row.sign_disagreement_rate)
+
+for row in result.activation_metrics:
+    print(row.comparison_id, row.activation_layer, row.cka_similarity, row.warnings)
+
+for signal in result.metric_availability:
+    print(signal.metric, signal.status.value, signal.reason)
 ```
 
-Inspect conflicts and get a strategy recommendation:
+## Nine underlying diagnostic signals
 
-```python
-for zone in result.conflict_zones:
-    print(f"Layers {zone.start_layer}-{zone.end_layer}: {zone.severity.value}")
+The composite heuristic is not counted as a separate diagnostic signal.
 
-if result.strategy:
-    print(f"Recommended: {result.strategy.method.value}")
-    print(result.strategy.mergekit_yaml)  # copy-paste into MergeKit
+| Signal | Level | Direct object | Default | Composite |
+|---|---|---|---|---|
+| Cosine similarity | Weight | Exact-shape flattened tensor alignment | Yes | Yes |
+| Normalized L2 distance | Weight | Difference relative to average tensor norm | Yes | No; displayed raw |
+| Weight-distribution divergence | Weight, experimental | Directional softmax transform of flattened weights | No; explicit selection only | No |
+| Spectral overlap | Weight | Leading left-singular-subspace overlap for matrices | Yes, resource bounded | Yes |
+| Effective-rank ratio | Weight | Ratio of entropy-derived effective ranks | Yes, resource bounded | Yes |
+| Sign disagreement | Candidate set task vector | Pairwise sign mismatch; zero/nonzero counts as mismatch | Yes when a shared base and at least two candidates exist | No |
+| TSV interference | Candidate set task vector | Pairwise numerical-rank right-subspace overlap | Yes when a shared base and at least two candidates exist | No |
+| Task-vector energy | Pair tensor task vector | Fraction of spectral energy in retained leading values | Yes with an explicit base | No |
+| Linear CKA | Activation layer, optional | Exact activation-layer observations with calibration and feature-width provenance | Only when supplied | No |
+
+All SVD-backed signals use a conservative full-decomposition resource policy and retain only numerical-rank directions. Full-ambient subspaces are reported as uninformative. A metric skipped by the resource policy is reported as `resource_limit_skipped`; it is not silently converted into a plausible number.
+
+## MergeKit configuration diagnosis
+
+```bash
+mergelens diagnose merge.yaml --json diagnosis.json
 ```
 
-Diagnose a MergeKit config:
+Diagnosis honours checkpoint references, an explicit task-vector base, and finite non-negative scalar weights only for top-level full-model inputs. It discloses ignored or unsupported semantics such as slice assembly, gradients, tokenizer remapping, chat templates, and method-specific merge execution. Unknown merge methods fail closed instead of becoming `linear`.
 
-```python
-from mergelens import diagnose_config
+Generated configurations follow current MergeKit model/parameter placement. They are marked `schema_validated` only when the installed MergeKit parser accepted them; otherwise they are marked `illustrative`.
 
-result = diagnose_config("merge.yaml")
-print(f"Overall interference: {result.overall_interference:.4f}")
-```
+## Reports and MCP
 
-## Metrics
+`mergelens[report]` produces one HTML file with Plotly JavaScript embedded. Charts group by explicit comparison ID and preserve missing metric values.
 
-| Metric | What It Measures | Range | Source |
-|--------|-----------------|-------|--------|
-| Cosine Similarity | Weight vector alignment | [-1, 1] | Standard |
-| L2 Distance | Normalized weight divergence | [0, +inf) | Standard |
-| KL Divergence | Weight distribution difference | [0, +inf) | Standard |
-| Spectral Subspace Overlap | Top-k SVD direction alignment | [0, 1] | Zhou et al. 2026 |
-| Effective Rank Ratio | Dimensionality compatibility | [0, 1] | Shannon entropy |
-| Sign Disagreement Rate | Parameter sign conflicts | [0, 1] | TIES-Merging (Yadav et al. 2023) |
-| TSV Interference | Cross-task singular vector conflict | [0, +inf) | Gargiulo et al. 2025 |
-| Task Vector Energy | Knowledge concentration in top SVs | [0, 1] | Choi et al. 2024 |
-| CKA Similarity | Activation representation similarity | [0, 1] | Kornblith et al. 2019 |
-| **Merge Compatibility Index** | **Composite go/no-go score** | **[0, 100]** | **Ours** |
-
-<details>
-<summary><strong>MCI Verdicts</strong></summary>
-
-| Score | Verdict | Meaning |
-|-------|---------|---------|
-| 75-100 | Highly Compatible | Merge with confidence |
-| 55-74 | Compatible | Should work, monitor quality |
-| 35-54 | Risky | Expect degradation, use targeted methods |
-| 0-34 | Incompatible | These models likely shouldn't be merged |
-
-</details>
-
-<details>
-<summary><strong>Strategy Recommendations</strong></summary>
-
-MergeLens maps diagnostic profiles to merge methods. Different metrics predict success for different methods ([Zhou et al. 2026](https://arxiv.org/abs/2601.22285) found only 46.7% metric overlap between methods):
-
-| Diagnostic Profile | Recommended Method |
-|--------------------|--------------------|
-| High cosine similarity everywhere | SLERP |
-| High sign disagreement (>30%) | TIES |
-| Concentrated task vector energy | DARE |
-| Low spectral overlap | Linear (small alpha) |
-
-Each recommendation includes a ready-to-paste MergeKit YAML config.
-
-</details>
-
-## MCP Integration
+The MCP server exposes seven tools: `compare_models`, `diagnose_merge`, `get_conflict_zones`, `suggest_strategy`, `generate_report`, `explain_layer`, and `get_compatibility_score`.
 
 ```json
 {
@@ -168,32 +120,32 @@ Each recommendation includes a ready-to-paste MergeKit YAML config.
 }
 ```
 
-Tools: `compare_models`, `diagnose_merge`, `get_conflict_zones`, `suggest_strategy`, `generate_report`, `explain_layer`, `get_compatibility_score`, `audit_model`
+## Memory and reproducibility
 
-## How It Works
+Safetensors are memory-mapped and aligned tensor groups are consumed lazily. No exact peak-memory multiplier is claimed: runtime memory also includes float32 conversions, task vectors, bounded SVD workspaces, activation tensors, result rows, report data, and framework overhead.
 
-MergeLens loads model weights lazily via memory-mapped safetensors (peak memory: 2× largest layer, not 2× full model). It computes metrics layer-by-layer, detects conflict zones, and aggregates everything into the MCI score.
-
-**Security:** No pickle/torch.load (safetensors only), `yaml.safe_load()`, tensor size limits, no credential leakage.
+See [limitations](https://github.com/shuhulx/mergelens/blob/main/LIMITATIONS.md), [validation status](https://github.com/shuhulx/mergelens/blob/main/VALIDATION.md), [migration guidance](https://github.com/shuhulx/mergelens/blob/main/MIGRATION.md), and the [changelog](https://github.com/shuhulx/mergelens/blob/main/CHANGELOG.md) before interpreting results.
 
 ## Development
 
 ```bash
-git clone https://github.com/shuhulx/mergelens.git
-cd mergelens
-pip install -e ".[dev,all]"
-pytest
+python -m pip install -e '.[dev,all]'
+ruff check .
+ruff format --check .
+pytest -q
+mypy src/mergelens
+python -m build
 ```
+
+Supported Python versions are 3.10, 3.11, and 3.12.
 
 ## References
 
-- Zhou et al. 2026, "Demystifying Mergeability of Homologous LLMs" ([arXiv:2601.22285](https://arxiv.org/abs/2601.22285))
-- Gargiulo et al. CVPR 2025, "Task Singular Vectors" ([arXiv:2412.00081](https://arxiv.org/abs/2412.00081))
-- Yadav et al. NeurIPS 2023, "TIES-Merging" ([arXiv:2306.01708](https://arxiv.org/abs/2306.01708))
-- Choi et al. 2024, "Revisiting Weight Averaging for Model Merging" ([arXiv:2412.12153](https://arxiv.org/abs/2412.12153))
-- Kornblith et al. 2019, "Similarity of Neural Network Representations Revisited" ([arXiv:1905.00414](https://arxiv.org/abs/1905.00414))
-- Rahamim et al. 2026, "Will it Merge?" ([arXiv:2601.06672](https://arxiv.org/abs/2601.06672))
+- MergeKit documentation and schema: [arcee-ai/mergekit](https://github.com/arcee-ai/mergekit)
+- Kornblith et al., “Similarity of Neural Network Representations Revisited”: [arXiv:1905.00414](https://arxiv.org/abs/1905.00414)
+- Yadav et al., “TIES-Merging”: [arXiv:2306.01708](https://arxiv.org/abs/2306.01708)
+- Gargiulo et al., “Task Singular Vectors”: [arXiv:2412.00081](https://arxiv.org/abs/2412.00081)
 
 ## License
 
-Apache 2.0
+Apache-2.0. See the [license](https://github.com/shuhulx/mergelens/blob/main/LICENSE).

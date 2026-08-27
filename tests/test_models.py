@@ -4,8 +4,6 @@ import pytest
 from pydantic import ValidationError
 
 from mergelens.models import (
-    AuditResult,
-    CapabilityScore,
     CompareResult,
     ConflictZone,
     DiagnoseResult,
@@ -16,7 +14,6 @@ from mergelens.models import (
     MergeConfig,
     MergeMethod,
     ModelInfo,
-    ProbeResult,
     Severity,
     StrategyRecommendation,
 )
@@ -45,9 +42,17 @@ class TestEnums:
 
     def test_layer_type_all_values(self):
         expected = {
-            "attn_q", "attn_k", "attn_v", "attn_o",
-            "mlp_gate", "mlp_up", "mlp_down",
-            "norm", "embedding", "lm_head", "other",
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_o",
+            "mlp_gate",
+            "mlp_up",
+            "mlp_down",
+            "norm",
+            "embedding",
+            "lm_head",
+            "other",
         }
         assert {lt.value for lt in LayerType} == expected
 
@@ -91,11 +96,15 @@ class TestLayerMetrics:
 
     def test_spectral_overlap_bounds(self):
         with pytest.raises(ValidationError):
-            LayerMetrics(layer_name="x", cosine_similarity=0.5, l2_distance=0.1, spectral_overlap=1.5)
+            LayerMetrics(
+                layer_name="x", cosine_similarity=0.5, l2_distance=0.1, spectral_overlap=1.5
+            )
 
     def test_sign_disagreement_bounds(self):
         with pytest.raises(ValidationError):
-            LayerMetrics(layer_name="x", cosine_similarity=0.5, l2_distance=0.1, sign_disagreement_rate=-0.1)
+            LayerMetrics(
+                layer_name="x", cosine_similarity=0.5, l2_distance=0.1, sign_disagreement_rate=-0.1
+            )
 
     def test_roundtrip(self):
         m = LayerMetrics(layer_name="layer.0", cosine_similarity=0.9, l2_distance=0.1)
@@ -135,33 +144,32 @@ class TestMergeCompatibilityIndex:
     def test_creation(self):
         mci = MergeCompatibilityIndex(
             score=85.0,
-            confidence=0.9,
-            ci_lower=80.0,
-            ci_upper=90.0,
-            verdict="highly compatible",
+            evidence_coverage=0.9,
+            heuristic_band_lower=80.0,
+            heuristic_band_upper=90.0,
+            risk_tier="lower_static_conflict",
         )
         assert mci.components == {}
+        assert mci.validation_status == "heuristic_unvalidated"
 
     def test_score_bounds(self):
         with pytest.raises(ValidationError):
-            MergeCompatibilityIndex(
-                score=101.0, confidence=0.5, ci_lower=0.0, ci_upper=100.0, verdict="x"
-            )
+            MergeCompatibilityIndex(score=101.0, evidence_coverage=0.5)
         with pytest.raises(ValidationError):
-            MergeCompatibilityIndex(
-                score=-1.0, confidence=0.5, ci_lower=0.0, ci_upper=100.0, verdict="x"
-            )
+            MergeCompatibilityIndex(score=-1.0, evidence_coverage=0.5)
 
-    def test_confidence_bounds(self):
+    def test_evidence_coverage_bounds(self):
         with pytest.raises(ValidationError):
-            MergeCompatibilityIndex(
-                score=50.0, confidence=1.5, ci_lower=0.0, ci_upper=100.0, verdict="x"
-            )
+            MergeCompatibilityIndex(score=50.0, evidence_coverage=1.5)
 
     def test_roundtrip(self):
         mci = MergeCompatibilityIndex(
-            score=50.0, confidence=0.8, ci_lower=40.0, ci_upper=60.0,
-            verdict="compatible", components={"cos": 0.9},
+            score=50.0,
+            evidence_coverage=0.8,
+            heuristic_band_lower=40.0,
+            heuristic_band_upper=60.0,
+            risk_tier="elevated_static_conflict",
+            components={"cos": 0.9},
         )
         mci2 = MergeCompatibilityIndex.model_validate_json(mci.model_dump_json())
         assert mci == mci2
@@ -171,24 +179,26 @@ class TestStrategyRecommendation:
     def test_creation(self):
         sr = StrategyRecommendation(
             method=MergeMethod.SLERP,
-            confidence=0.85,
+            heuristic_strength=0.85,
             reasoning="High similarity",
             mergekit_yaml="merge_method: slerp\n",
         )
         assert sr.warnings == []
         assert sr.per_layer_overrides == {}
 
-    def test_confidence_bounds(self):
+    def test_rule_strength_bounds(self):
         with pytest.raises(ValidationError):
             StrategyRecommendation(
-                method=MergeMethod.LINEAR, confidence=2.0,
-                reasoning="x", mergekit_yaml="x",
+                method=MergeMethod.LINEAR,
+                heuristic_strength=2.0,
+                reasoning="x",
+                mergekit_yaml="x",
             )
 
     def test_roundtrip(self):
         sr = StrategyRecommendation(
             method=MergeMethod.TIES,
-            confidence=0.7,
+            heuristic_strength=0.7,
             reasoning="reason",
             mergekit_yaml="yaml",
             warnings=["warn1"],
@@ -207,8 +217,11 @@ class TestModelInfo:
 
     def test_full(self):
         mi = ModelInfo(
-            name="llama", path_or_repo="meta-llama/Llama-2",
-            num_parameters=7_000_000_000, architecture="LlamaForCausalLM", num_layers=32,
+            name="llama",
+            path_or_repo="meta-llama/Llama-2",
+            num_parameters=7_000_000_000,
+            architecture="LlamaForCausalLM",
+            num_layers=32,
         )
         assert mi.num_parameters == 7_000_000_000
 
@@ -222,7 +235,11 @@ class TestCompareResult:
             ],
             conflict_zones=[],
             mci=MergeCompatibilityIndex(
-                score=80.0, confidence=0.9, ci_lower=75.0, ci_upper=85.0, verdict="compatible",
+                score=80.0,
+                evidence_coverage=0.9,
+                heuristic_band_lower=75.0,
+                heuristic_band_upper=85.0,
+                risk_tier="lower_static_conflict",
             ),
         )
         assert cr.strategy is None
@@ -234,7 +251,11 @@ class TestCompareResult:
             layer_metrics=[],
             conflict_zones=[],
             mci=MergeCompatibilityIndex(
-                score=50.0, confidence=0.5, ci_lower=40.0, ci_upper=60.0, verdict="risky",
+                score=50.0,
+                evidence_coverage=0.5,
+                heuristic_band_lower=40.0,
+                heuristic_band_upper=60.0,
+                risk_tier="elevated_static_conflict",
             ),
             metadata={"key": "val"},
         )
@@ -275,7 +296,9 @@ class TestInterferenceScore:
 
     def test_roundtrip(self):
         i = InterferenceScore(
-            layer_name="l0", score=0.3, source_contributions={"a": 0.6, "b": 0.4},
+            layer_name="l0",
+            score=0.3,
+            source_contributions={"a": 0.6, "b": 0.4},
         )
         i2 = InterferenceScore.model_validate_json(i.model_dump_json())
         assert i == i2
@@ -299,65 +322,3 @@ class TestDiagnoseResult:
                 interference_scores=[],
                 overall_interference=1.5,
             )
-
-
-class TestProbeResult:
-    def test_creation(self):
-        pr = ProbeResult(
-            probe_id="p1", category="reasoning", prompt="2+2?",
-            response="4", score=1.0,
-        )
-        assert pr.judge_reasoning is None
-
-    def test_score_bounds(self):
-        with pytest.raises(ValidationError):
-            ProbeResult(
-                probe_id="p1", category="c", prompt="p",
-                response="r", score=1.1,
-            )
-
-
-class TestCapabilityScore:
-    def test_creation(self):
-        cs = CapabilityScore(
-            category="math", base_score=0.9, merged_score=0.85,
-            retention=0.944, num_probes=10,
-        )
-        assert cs.retention == pytest.approx(0.944)
-
-    def test_score_bounds(self):
-        with pytest.raises(ValidationError):
-            CapabilityScore(
-                category="x", base_score=1.5, merged_score=0.5,
-                retention=1.0, num_probes=1,
-            )
-
-
-class TestAuditResult:
-    def test_creation(self):
-        ar = AuditResult(
-            base_model="base",
-            merged_model="merged",
-            capability_scores=[
-                CapabilityScore(
-                    category="math", base_score=0.9, merged_score=0.85,
-                    retention=0.944, num_probes=5,
-                ),
-            ],
-            overall_retention=0.944,
-        )
-        assert ar.probe_results == []
-        assert ar.regressions == []
-        assert ar.improvements == []
-
-    def test_roundtrip(self):
-        ar = AuditResult(
-            base_model="b",
-            merged_model="m",
-            capability_scores=[],
-            overall_retention=1.0,
-            regressions=["math dropped"],
-            improvements=["code improved"],
-        )
-        ar2 = AuditResult.model_validate_json(ar.model_dump_json())
-        assert ar == ar2

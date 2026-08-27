@@ -1,14 +1,12 @@
-"""HTML report generator using Plotly and Jinja2."""
+"""Offline HTML reporting with explicit comparison identity and evidence limits."""
 
 from __future__ import annotations
 
-import html as html_mod
-import json
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-from mergelens.models import AuditResult, CompareResult, DiagnoseResult
+from mergelens.models import CompareResult, DiagnoseResult, TensorMetrics
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 
@@ -16,302 +14,258 @@ _TEMPLATE_DIR = Path(__file__).parent / "templates"
 def generate_report(
     compare_result: CompareResult | None = None,
     diagnose_result: DiagnoseResult | None = None,
-    audit_result: AuditResult | None = None,
     output_path: str = "mergelens_report.html",
     title: str = "MergeLens Report",
 ) -> str:
-    """Generate a self-contained interactive HTML report.
+    """Generate one offline HTML file with embedded Plotly JavaScript.
 
-    Embeds Plotly.js for interactive charts. Single file, no external dependencies.
-
-    Args:
-        compare_result: Results from compare.models()
-        diagnose_result: Results from diagnose.from_config()
-        audit_result: Results from audit.run()
-        output_path: Where to save the HTML file
-        title: Report title
-
-    Returns:
-        Path to generated report.
+    Report dependencies are imported lazily so the core package remains usable
+    without the ``report`` extra.
     """
+    try:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        from plotly.offline import get_plotlyjs  # type: ignore[import-not-found, import-untyped]
+    except ImportError as exc:
+        raise ImportError(
+            "HTML reports require optional dependencies. Install with: pip install mergelens[report]"
+        ) from exc
+
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATE_DIR)),
         autoescape=select_autoescape(["html", "j2"]),
     )
-    template = env.get_template("base.html.j2")
+    charts: dict[str, dict[str, Any]] = {}
+    if compare_result is not None:
+        charts = {
+            "heuristic": _build_heuristic_gauge(compare_result),
+            "heatmap": _build_similarity_heatmap(compare_result),
+            "spectral": _build_spectral_chart(compare_result),
+            "tensor_metrics": _build_tensor_metrics_chart(compare_result),
+            "conflicts": _build_conflict_chart(compare_result),
+        }
 
-    # Build plotly chart data
-    charts = {}
-
-    if compare_result:
-        charts["mci"] = _build_mci_gauge(compare_result)
-        charts["heatmap"] = _build_similarity_heatmap(compare_result)
-        charts["spectral"] = _build_spectral_chart(compare_result)
-        charts["layer_metrics"] = _build_layer_metrics_chart(compare_result)
-        charts["conflicts"] = _build_conflict_chart(compare_result)
-
-    title = html_mod.escape(title)
-
-    html = template.render(
+    rendered = env.get_template("base.html.j2").render(
         title=title,
         compare=compare_result,
         diagnose=diagnose_result,
-        audit=audit_result,
         charts=charts,
-        charts_json={k: json.dumps(v) for k, v in charts.items()},
+        plotly_js=get_plotlyjs(),
     )
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(rendered, encoding="utf-8")
+    return str(destination)
 
-    Path(output_path).write_text(html)
-    return output_path
 
-
-def _build_mci_gauge(result: CompareResult) -> dict:
-    """Build Plotly gauge chart for MCI score."""
-    mci = result.mci
+def _build_heuristic_gauge(result: CompareResult) -> dict[str, Any]:
+    """Build a gauge without statistical-confidence terminology."""
+    assessment = result.mci
+    score = assessment.score
+    if score is None:
+        return {
+            "data": [],
+            "layout": {
+                "title": "Static-risk heuristic suppressed: insufficient structural evidence",
+                "height": 180,
+            },
+        }
+    band = ""
+    if assessment.heuristic_band_lower is not None and assessment.heuristic_band_upper is not None:
+        band = (
+            f"; sensitivity band {assessment.heuristic_band_lower:.0f}-"
+            f"{assessment.heuristic_band_upper:.0f}"
+        )
     return {
         "data": [
             {
                 "type": "indicator",
-                "mode": "gauge+number+delta",
-                "value": mci.score,
-                "title": {"text": "Merge Compatibility Index"},
+                "mode": "gauge+number",
+                "value": score,
+                "title": {"text": "Unvalidated static-risk heuristic"},
                 "gauge": {
                     "axis": {"range": [0, 100]},
-                    "bar": {"color": _score_color(mci.score)},
+                    "bar": {"color": _score_color(score)},
                     "steps": [
-                        {"range": [0, 35], "color": "#ffebee"},
-                        {"range": [35, 55], "color": "#fff3e0"},
-                        {"range": [55, 75], "color": "#e8f5e9"},
-                        {"range": [75, 100], "color": "#c8e6c9"},
+                        {"range": [0, 55], "color": "#ffebee"},
+                        {"range": [55, 75], "color": "#fff3e0"},
+                        {"range": [75, 100], "color": "#e8f5e9"},
                     ],
-                    "threshold": {
-                        "line": {"color": "black", "width": 2},
-                        "thickness": 0.75,
-                        "value": mci.score,
-                    },
                 },
             }
         ],
         "layout": {
             "height": 300,
-            "margin": {"t": 50, "b": 20, "l": 30, "r": 30},
+            "margin": {"t": 50, "b": 30, "l": 30, "r": 30},
             "annotations": [
                 {
-                    "text": f"{mci.verdict} (CI: {mci.ci_lower:.0f}-{mci.ci_upper:.0f})",
+                    "text": f"{assessment.risk_tier}{band}; {assessment.validation_status}",
                     "x": 0.5,
                     "y": 0,
                     "showarrow": False,
-                    "font": {"size": 14},
+                    "font": {"size": 13},
                 }
             ],
         },
     }
 
 
-def _build_similarity_heatmap(result: CompareResult) -> dict:
-    """Build Plotly heatmap of layer-by-layer cosine similarity."""
-    layers = [m.layer_name.split(".")[-1][:30] for m in result.layer_metrics]
-    values = [m.cosine_similarity for m in result.layer_metrics]
+def _rows_by_comparison(result: CompareResult) -> dict[str, list[TensorMetrics]]:
+    grouped: dict[str, list[TensorMetrics]] = defaultdict(list)
+    for row in result.tensor_metrics:
+        grouped[row.comparison_id].append(row)
+    for rows in grouped.values():
+        rows.sort(key=lambda row: (row.tensor_position, row.tensor_name))
+    return dict(sorted(grouped.items()))
 
-    # Build y-axis labels from model pairs
-    model_names = [m.name for m in result.models]
-    if len(model_names) >= 2:
-        from itertools import combinations
 
-        pair_labels = [f"{a} vs {b}" for a, b in combinations(model_names, 2)]
-    else:
-        pair_labels = ["Cosine Similarity"]
+def _pair_label(rows: list[TensorMetrics], comparison_id: str) -> str:
+    if not rows:
+        return comparison_id
+    return f"{rows[0].reference_model} vs {rows[0].candidate_model}"
 
-    # Organize into rows per scored model. layer_metrics contains one entry per
-    # (layer, scored_model) pair — n_scored rows of n_layers each. n_scored is
-    # len(models) - 1 when the first model acts as implicit base (common case).
-    # Use n_scored rather than n_pairs (combinations) which overcounts for
-    # multi-model comparisons.
-    n_scored = max(len(result.models) - 1, 1)
-    n_layers = (
-        len(layers) // n_scored if n_scored > 1 and len(layers) % n_scored == 0 else len(layers)
-    )
 
-    if n_scored > 1 and len(values) == n_layers * n_scored:
-        z = [values[i * n_layers : (i + 1) * n_layers] for i in range(n_scored)]
-        x_labels = [m.layer_name.split(".")[-1][:30] for m in result.layer_metrics[:n_layers]]
-        pair_labels = pair_labels[:n_scored] if len(pair_labels) >= n_scored else pair_labels
-    else:
-        z = [values]
-        x_labels = layers
-        pair_labels = pair_labels[:1] if pair_labels else ["Cosine Similarity"]
-
-    height = max(200, 60 * len(pair_labels) + 80)
-
+def _build_similarity_heatmap(result: CompareResult) -> dict[str, Any]:
+    """Build a pair-attributable heatmap without contiguous-row assumptions."""
+    grouped = _rows_by_comparison(result)
+    positions: dict[str, int] = {}
+    for rows in grouped.values():
+        for row in rows:
+            positions[row.tensor_name] = min(
+                positions.get(row.tensor_name, row.tensor_position), row.tensor_position
+            )
+    tensor_names = sorted(positions, key=lambda name: (positions[name], name))
+    matrix: list[list[float | None]] = []
+    pair_labels: list[str] = []
+    for comparison_id, rows in grouped.items():
+        values = {row.tensor_name: row.cosine_similarity for row in rows}
+        matrix.append([values.get(name) for name in tensor_names])
+        pair_labels.append(_pair_label(rows, comparison_id))
     return {
         "data": [
             {
                 "type": "heatmap",
-                "z": z,
-                "x": x_labels,
+                "z": matrix,
+                "x": tensor_names,
                 "y": pair_labels,
                 "colorscale": "RdYlGn",
-                "zmin": 0,
+                "zmin": -1,
                 "zmax": 1,
-                "colorbar": {"title": "Cosine Sim"},
+                "colorbar": {"title": "Cosine"},
+                "hoverongaps": False,
             }
         ],
         "layout": {
-            "title": "Layer-by-Layer Cosine Similarity",
-            "height": height,
-            "margin": {"t": 40, "b": 80, "l": 150, "r": 30},
+            "title": "Exact-shape tensor cosine similarity by checkpoint pair",
+            "height": max(260, 70 * len(pair_labels) + 130),
+            "margin": {"t": 50, "b": 130, "l": 180, "r": 30},
             "xaxis": {"tickangle": -45, "tickfont": {"size": 8}},
         },
     }
 
 
-def _build_spectral_chart(result: CompareResult) -> dict:
-    """Build Plotly line chart for spectral metrics across layers."""
-    layers = list(range(len(result.layer_metrics)))
+def _metric_traces(
+    result: CompareResult,
+    metrics: tuple[tuple[str, str], ...],
+) -> list[dict[str, Any]]:
+    traces: list[dict[str, Any]] = []
+    for comparison_id, rows in _rows_by_comparison(result).items():
+        for attribute, label in metrics:
+            values = [getattr(row, attribute) for row in rows]
+            if not any(value is not None for value in values):
+                continue
+            traces.append(
+                {
+                    "type": "scatter",
+                    "mode": "lines+markers",
+                    "x": [row.tensor_position for row in rows],
+                    "y": values,
+                    "text": [row.tensor_name for row in rows],
+                    "name": f"{_pair_label(rows, comparison_id)} - {label}",
+                    "connectgaps": False,
+                }
+            )
+    return traces
 
-    traces = []
 
-    spec = [m.spectral_overlap for m in result.layer_metrics]
-    if any(v is not None for v in spec):
-        traces.append(
-            {
-                "type": "scatter",
-                "mode": "lines+markers",
-                "x": layers,
-                "y": [v if v is not None else None for v in spec],
-                "name": "Spectral Overlap",
-                "connectgaps": True,
-            }
-        )
-
-    rank = [m.effective_rank_ratio for m in result.layer_metrics]
-    if any(v is not None for v in rank):
-        traces.append(
-            {
-                "type": "scatter",
-                "mode": "lines+markers",
-                "x": layers,
-                "y": [v if v is not None else None for v in rank],
-                "name": "Rank Ratio",
-                "connectgaps": True,
-            }
-        )
-
-    energy = [m.task_vector_energy for m in result.layer_metrics]
-    if any(v is not None for v in energy):
-        traces.append(
-            {
-                "type": "scatter",
-                "mode": "lines+markers",
-                "x": layers,
-                "y": [v if v is not None else None for v in energy],
-                "name": "Task Vector Energy",
-                "connectgaps": True,
-            }
-        )
-
-    sign = [m.sign_disagreement_rate for m in result.layer_metrics]
-    if any(v is not None for v in sign):
-        traces.append(
-            {
-                "type": "scatter",
-                "mode": "lines+markers",
-                "x": layers,
-                "y": [v if v is not None else None for v in sign],
-                "name": "Sign Disagreement",
-                "line": {"dash": "dot"},
-                "connectgaps": True,
-            }
-        )
-
+def _build_spectral_chart(result: CompareResult) -> dict[str, Any]:
+    """Build spectral traces grouped explicitly by checkpoint pair."""
     return {
-        "data": traces,
+        "data": _metric_traces(
+            result,
+            (
+                ("spectral_overlap", "spectral overlap"),
+                ("effective_rank_ratio", "effective-rank ratio"),
+                ("task_vector_energy", "task-vector energy"),
+            ),
+        ),
         "layout": {
-            "title": "Spectral Analysis Dashboard",
-            "xaxis": {"title": "Layer Index"},
-            "yaxis": {"title": "Score", "range": [0, 1.1]},
-            "height": 400,
-            "margin": {"t": 40, "b": 40, "l": 60, "r": 30},
+            "title": "Bounded spectral diagnostics by ordered tensor position",
+            "xaxis": {"title": "Ordered tensor position"},
+            "yaxis": {"title": "Measured value", "range": [0, 1.05]},
+            "height": 420,
         },
     }
 
 
-def _build_layer_metrics_chart(result: CompareResult) -> dict:
-    """Build dual-axis chart showing L2 distance and sign disagreement per layer."""
-    layers = list(range(len(result.layer_metrics)))
-    l2_vals = [m.l2_distance for m in result.layer_metrics]
-    sign_vals = [m.sign_disagreement_rate for m in result.layer_metrics]
-    has_sign = any(v is not None for v in sign_vals)
-
-    traces = [
-        {
-            "type": "bar",
-            "x": layers,
-            "y": l2_vals,
-            "name": "L2 Distance",
-            "marker": {"color": "#5c6bc0", "opacity": 0.7},
-            "yaxis": "y",
-        }
-    ]
-
-    if has_sign:
-        traces.append(
-            {
-                "type": "scatter",
-                "mode": "lines+markers",
-                "x": layers,
-                "y": [v if v is not None else None for v in sign_vals],
-                "name": "Sign Disagreement Rate",
-                "line": {"color": "#ef5350", "width": 2},
-                "marker": {"color": "#ef5350", "size": 5},
-                "yaxis": "y2",
-                "connectgaps": True,
-            }
-        )
-
-    layout: dict = {
-        "title": "Layer-Level Divergence: L2 Distance & Sign Disagreement",
-        "xaxis": {"title": "Layer Index"},
-        "yaxis": {"title": "L2 Distance", "side": "left"},
-        "height": 400,
-        "margin": {"t": 40, "b": 40, "l": 60, "r": 80},
-        "legend": {"x": 1.08, "y": 1},
+def _build_tensor_metrics_chart(result: CompareResult) -> dict[str, Any]:
+    """Build pair L2 and separately attributed candidate-set task-vector traces."""
+    traces = _metric_traces(result, (("l2_distance", "normalized L2 distance"),))
+    for attribute, label in (
+        ("sign_disagreement_rate", "candidate-set sign disagreement"),
+        ("tsv_interference", "candidate-set TSV interference"),
+    ):
+        values = [getattr(row, attribute) for row in result.candidate_set_metrics]
+        if any(value is not None for value in values):
+            traces.append(
+                {
+                    "type": "scatter",
+                    "mode": "lines+markers",
+                    "x": [row.tensor_position for row in result.candidate_set_metrics],
+                    "y": values,
+                    "text": [row.tensor_name for row in result.candidate_set_metrics],
+                    "name": f"candidate_set_0 - {label}",
+                    "connectgaps": False,
+                }
+            )
+    return {
+        "data": traces,
+        "layout": {
+            "title": "Tensor diagnostics by checkpoint pair",
+            "xaxis": {"title": "Ordered tensor position"},
+            "yaxis": {"title": "Measured value"},
+            "height": 420,
+        },
     }
-    if has_sign:
-        layout["yaxis2"] = {
-            "title": "Sign Disagreement Rate",
-            "side": "right",
-            "overlaying": "y",
-            "range": [0, 1.1],
-        }
-
-    return {"data": traces, "layout": layout}
 
 
-def _build_conflict_chart(result: CompareResult) -> dict:
-    """Build Plotly bar chart for conflict zones."""
-    if not result.conflict_zones:
-        return {"data": [], "layout": {"title": "No conflict zones detected"}}
+_build_layer_metrics_chart = _build_tensor_metrics_chart
 
-    zones = result.conflict_zones
+
+def _build_conflict_chart(result: CompareResult) -> dict[str, Any]:
+    """Build inspection-priority bars with pair and tensor identity."""
+    regions = result.tensor_conflict_regions
+    if not regions:
+        return {"data": [], "layout": {"title": "No heuristic inspection regions identified"}}
+    labels = [
+        f"{region.comparison_id}: {region.start_tensor_position}-{region.end_tensor_position}"
+        for region in regions
+    ]
     return {
         "data": [
             {
                 "type": "bar",
-                "x": [f"Zone {i + 1}" for i in range(len(zones))],
-                "y": [z.avg_cosine_sim for z in zones],
+                "x": labels,
+                "y": [region.avg_cosine_similarity for region in regions],
+                "text": ["<br>".join(region.tensor_names) for region in regions],
                 "marker": {
-                    "color": [_severity_color_hex(z.severity.value) for z in zones],
+                    "color": [_severity_color_hex(region.severity.value) for region in regions]
                 },
-                "text": [f"Layers {z.start_layer}-{z.end_layer}" for z in zones],
-                "textposition": "auto",
             }
         ],
         "layout": {
-            "title": "Conflict Zone Analysis",
-            "yaxis": {"title": "Avg Cosine Similarity", "range": [0, 1]},
-            "height": 300,
-            "margin": {"t": 40, "b": 40, "l": 60, "r": 30},
+            "title": "Heuristic tensor inspection priorities",
+            "yaxis": {"title": "Mean cosine similarity", "range": [-1, 1]},
+            "height": 340,
         },
     }
 
@@ -321,12 +275,13 @@ def _score_color(score: float) -> str:
         return "#4caf50"
     if score >= 55:
         return "#ff9800"
-    if score >= 35:
-        return "#f44336"
-    return "#b71c1c"
+    return "#f44336"
 
 
 def _severity_color_hex(severity: str) -> str:
-    return {"low": "#4caf50", "medium": "#ff9800", "high": "#f44336", "critical": "#b71c1c"}.get(
-        severity, "#9e9e9e"
-    )
+    return {
+        "low": "#4caf50",
+        "medium": "#ff9800",
+        "high": "#f44336",
+        "critical": "#b71c1c",
+    }.get(severity, "#9e9e9e")

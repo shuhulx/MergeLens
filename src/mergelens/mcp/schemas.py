@@ -17,6 +17,7 @@ class CompareInput(BaseModel):
     base_model: str | None = Field(None, description="Base model for task vectors")
     device: str = Field("cpu", description="Torch device")
     svd_rank: int = Field(64, description="SVD rank for spectral metrics")
+    metrics: list[str] | None = Field(None, description="Optional diagnostic-signal selection")
 
 
 class DiagnoseInput(BaseModel):
@@ -30,6 +31,7 @@ class CompatibilityInput(BaseModel):
     """Input for get_compatibility_score tool."""
 
     models: list[str] = Field(..., description="Model paths or HF repo IDs (2+)")
+    base_model: str | None = Field(None, description="Explicit shared base")
     device: str = Field("cpu", description="Torch device")
 
 
@@ -51,5 +53,6 @@ class ReportInput(BaseModel):
     """Input for generate_report tool."""
 
     models: list[str] = Field(..., description="Model paths or HF repo IDs")
+    base_model: str | None = Field(None, description="Explicit shared base")
     output_path: str = Field("mergelens_report.html", description="Output file path")
     device: str = Field("cpu", description="Torch device")

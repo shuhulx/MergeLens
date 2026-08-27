@@ -1,7 +1,11 @@
 # MergeLens
 
 [![CI](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml/badge.svg)](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/mergelens)](https://pypi.org/project/mergelens/)
+[![Tests](https://img.shields.io/badge/tests-176%20passed-brightgreen.svg)](https://github.com/shuhulx/MergeLens/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mergelens?cacheSeconds=300)](https://pypi.org/project/mergelens/)
+[![GitHub](https://img.shields.io/github/v/tag/shuhulx/MergeLens?label=github&cacheSeconds=300)](https://github.com/shuhulx/MergeLens/tags)
+[![Downloads](https://img.shields.io/pypi/dm/mergelens?cacheSeconds=300)](https://pypistats.org/packages/mergelens)
+[![Status](https://img.shields.io/pypi/status/mergelens?cacheSeconds=300)](https://pypi.org/project/mergelens/)
 [![Python](https://img.shields.io/pypi/pyversions/mergelens)](https://pypi.org/project/mergelens/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/shuhulx/mergelens/blob/main/LICENSE)
 

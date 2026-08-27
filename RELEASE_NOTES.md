@@ -1,5 +1,5 @@
-# MergeLens 2.0.2
+# MergeLens 2.0.3
 
-The README and supporting documentation now use shorter, more direct wording.
+The README once again shows the test count and monthly downloads. It also shows the latest GitHub tag and PyPI development status.
 
-There are no API or behavior changes in this release.
+PyPI publishing from GitHub is now manual. There are no package API or runtime changes in this release.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.3
+
+- Restored the test-count and monthly-download badges.
+- Added GitHub-version and PyPI-status badges.
+- Changed the PyPI workflow to manual runs.
+
+There are no package API or runtime changes in this release.
+
 ## 2.0.2
 
 - Polished the README, limitations, validation notes, and migration guide.
